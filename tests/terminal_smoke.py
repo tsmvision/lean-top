@@ -237,9 +237,9 @@ def main():
     binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/release/lean-top").resolve())
     plain = subprocess.check_output([binary, "--demo", "--snapshot"])
     assert b"\x1b" not in plain
-    assert b"34 / 120 files" in plain
+    assert b"34 / 120" in plain
     assert b"Lake jobs: 342/680" in plain
-    assert b"Initial Lean files" in plain and b"Est. time" in plain
+    assert b"Initial Lean files" not in plain and b"Est. time" in plain
     bad = subprocess.run([binary, "--interval-ms", "99"], capture_output=True)
     assert bad.returncode != 0
     non_tty = subprocess.run([binary, "--demo"], capture_output=True)
@@ -346,13 +346,13 @@ def exercise_estimates(binary):
                         return bytes(data)
             raise AssertionError(f"Missing estimate evidence {needles!r}: {data[-1500:]!r}")
         try:
-            expect_all(["Initial Lean files ≈ 3 · done 0".encode(),b"0 / 3 files",b"6s total",b"6s left"])
+            expect_all([b"0 / 3",b"6s total",b"6s left"])
             with log.open("a",encoding="utf-8") as output:
                 output.write("✔ [4/10] Built A (1s)\n")
-            expect_all(["Initial Lean files ≈ 3 · done 1".encode(),b"1 / 3 files"])
+            expect_all([b"1 / 3"])
             with log.open("a",encoding="utf-8") as output:
                 output.write("✔ [5/50000] Built D (1s)\n")
-            expect_all(["Initial Lean files ≈ 3 · done 1".encode(),b"1 / 3 files",b"Built D"])
+            expect_all([b"1 / 3",b"Built D"])
             screen = screen_text(captured)
             assert "extra" not in screen and "additional" not in screen
             os.write(master,b"q")

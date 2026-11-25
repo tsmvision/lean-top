@@ -97,8 +97,7 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
 
 BUILD
 ● ACTIVE    6 Lean/Lake processes · server-wide
-Initial Lean files ≈ 120 · done 34 · demo estimate
-████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       34 / 120 files
+████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       34 / 120
 Est. time ≈ 3m 0s total · ≈ 2m 9s left
 Log: simulated build.log · last read 12:34:56 UTC
 Lake jobs: 342/680 · ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
@@ -120,7 +119,7 @@ warning: ExplicitFormula.lean:128: unused variable `h`
 q Quit  Space Pause  Wheel Scroll  Click/p Details  ↑↓ Logs  f Follow  ? Help
 ```
 
-The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. Compact mode hides the process table and initially shows core resource values; expanding Resources reveals additional details. Build always retains its status, fixed file progress, and estimated total/remaining time row. Resizing can hide supplemental file summaries, log-source information, and latest-event captions.
+The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. Compact mode hides the process table and initially shows core resource values; expanding Resources reveals additional details. Build always retains its status, fixed file progress, and estimated total/remaining time row. The file counter uses only `completed / total`, without `files`, `fixed`, `extra`, or a duplicate file-summary line. Unknown counts appear as `— / —`. Resizing can hide log-source information and latest-event captions.
 
 Unchanged log rows stay on screen while resource metrics continue to refresh. The log's last-read time is a fixed UTC timestamp that changes only when new bytes are read, rather than a continuously advancing age counter. Scrolling, help, and terminal resizing can still redraw the affected area.
 
@@ -191,7 +190,7 @@ Lake counts build jobs, not `.lean` source files. One module can produce several
 
 All predictions use `≈` and a confidence/scope label. They are not Lake's exact build plan: dynamic/custom target configuration, generated modules, cache layout, and hash-based dependency decisions can change actual work. The scan uses a local/import fallback rather than executing `lakefile.lean`. The displayed total time estimates the analyzed Lean compilation work from the monitor's observation window, not a recovered start time for a build you joined midway, and it excludes unrelated native/link jobs. See [Lake's module build decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
 
-The `done` value counts distinct recognized source-module completions from the fixed initial set observed after the monitor's baseline. Additional known files are tracked separately; a full bar means the initial set completed, not that all extra work or the Lake build finished. Time forecasts include discovered additional work and may still change. Initial log history can seed timing estimates, but is not counted as new work completed during this session. Source analysis, `Scanning`, `Unavailable`, and missing timing data are different states; a missing estimate is never replaced with the Lake job denominator. Detected log rotation/truncation starts a new analysis, while same-inode truncate-and-regrow between samples can remain undetected.
+The numerator counts distinct recognized source-module completions from the fixed initial set observed after the monitor's baseline. Additional known files are tracked separately; a full bar means the initial set completed, not that all extra work or the Lake build finished. Time forecasts include discovered additional work and may still change. Initial log history can seed timing estimates, but is not counted as new work completed during this session. Source analysis, `Scanning`, `Unavailable`, and missing timing data are different states; a missing estimate is never replaced with the Lake job denominator. Detected log rotation/truncation starts a new analysis, while same-inode truncate-and-regrow between samples can remain undetected.
 
 Log progress can belong to an earlier run and does not supply a build exit code. A full progress bar does not establish a successful build or a valid theorem proof. This tool does not inspect Lean declarations, axioms, `sorry`, or proof artifacts.
 

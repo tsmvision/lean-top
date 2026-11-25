@@ -1038,34 +1038,10 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         Color::Text,
         w - 17,
     );
-    let progress_y = b + 2 + usize::from(layout.build.len() >= 6);
-    if layout.build.len() >= 6 {
-        let files = state
-            .estimate
-            .files
-            .map(|total| {
-                let scope = if inside >= 85 && !state.estimate.scope.is_empty() {
-                    format!(" · {}", state.estimate.scope)
-                } else {
-                    " · approx.".into()
-                };
-                format!(
-                    "Initial Lean files ≈ {total} · done {}{scope}",
-                    state.estimate.completed
-                )
-            })
-            .unwrap_or_else(|| {
-                if state.estimate.scope.to_lowercase().contains("scann") {
-                    "Est. Lean files: scanning sources…".into()
-                } else {
-                    "Est. Lean files: unavailable".into()
-                }
-            });
-        frame.text(2, b + 2, &files, Color::Muted, inside);
-    }
+    let progress_y = b + 2;
     if let Some(total) = state.estimate.files {
         let completed = state.estimate.completed.min(total);
-        let label = format!("{completed} / {total} files");
+        let label = format!("{completed} / {total}");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
             2,
@@ -1087,13 +1063,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             (w - 2).saturating_sub(x),
         );
     } else {
-        frame.text(
-            2,
-            progress_y,
-            "File total unavailable · waiting for source analysis",
-            Color::Muted,
-            inside,
-        );
+        frame.text(2, progress_y, "— / —", Color::Muted, inside);
     }
     let lines = log.visible_lines();
     let latest = lines.iter().rev().find(|line| progress(line).is_some());
@@ -1583,8 +1553,10 @@ mod tests {
             38,
         )
         .plain();
-        assert!(text.contains("Initial Lean files ≈ 120 · done 34"));
-        assert!(text.contains("34 / 120 files"));
+        assert!(!text.contains("Initial Lean files"));
+        assert!(text.contains("34 / 120"));
+        assert!(!text.contains("120 files"));
+        assert!(!text.contains("fixed"));
         assert!(!text.contains("extra"));
         assert!(!text.contains("additional"));
         assert!(text.contains("Lake jobs: 342/680"));
