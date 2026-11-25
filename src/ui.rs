@@ -651,10 +651,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         } else {
             format!("{}-{} / {}", start + 1, end, s.processes.len())
         };
-        frame.rule(
-            process_region.start,
-            &format!("PROCESSES · {range}"),
-        );
+        frame.rule(process_region.start, &format!("PROCESSES · {range}"));
         frame.text(
             2,
             b + 8,
