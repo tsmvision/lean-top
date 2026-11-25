@@ -274,6 +274,7 @@ def main():
         exercise(binary, key)
     exercise_wrapping(binary)
     exercise_estimates(binary)
+    exercise_estimate_restart(binary)
     exercise_log_stability(binary)
     exercise_log_history(binary)
     if sys.platform.startswith("linux"):
@@ -281,7 +282,7 @@ def main():
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, restored compilation counts after restart, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
 
 
 def exercise_wrapping(binary):
@@ -327,7 +328,7 @@ def exercise_estimates(binary):
         artifacts.mkdir(parents=True)
         (artifacts / "D.olean").write_text("cached")
         log = project / "build.log"
-        log.write_text("✔ [1/10] Built A (1s)\n✔ [2/10] Built B (2s)\n✔ [3/10] Built C (3s)\n",encoding="utf-8")
+        log.write_text("✔ [1/10] Built A (1s)\n",encoding="utf-8")
         original_paths = {path.relative_to(project) for path in project.rglob("*")}
         master,slave = os.openpty()
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
@@ -346,13 +347,13 @@ def exercise_estimates(binary):
                         return bytes(data)
             raise AssertionError(f"Missing estimate evidence {needles!r}: {data[-1500:]!r}")
         try:
-            expect_all([b"0 / 3",b"6s total",b"6s left"])
+            expect_all([b"1 / 3",b"3s total",b"2s left"])
             with log.open("a",encoding="utf-8") as output:
-                output.write("✔ [4/10] Built A (1s)\n")
-            expect_all([b"1 / 3"])
+                output.write("✔ [4/10] Built B (1s)\n")
+            expect_all([b"2 / 3"])
             with log.open("a",encoding="utf-8") as output:
                 output.write("✔ [5/50000] Built D (1s)\n")
-            expect_all([b"1 / 3",b"Built D"])
+            expect_all([b"3 / 3",b"Built D"])
             screen = screen_text(captured)
             assert "extra" not in screen and "additional" not in screen
             os.write(master,b"q")
@@ -446,6 +447,53 @@ def exercise_log_history(binary):
                 process.wait()
             os.close(master)
             os.close(slave)
+
+
+def exercise_estimate_restart(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-restart-") as directory:
+        project = Path(directory)
+        artifacts = project / ".lake/build/lib/lean"
+        artifacts.mkdir(parents=True)
+        for i in range(320):
+            (project / f"M{i:04}.lean").write_text("import Init\n")
+            if i < 300:
+                (artifacts / f"M{i:04}.olean").write_text("fresh")
+        log = project / "build.log"
+        log.write_text("".join(f"✔ [{i}/50000] Built M{i:04} {'retained history ' * 15}(1s)\n" for i in range(300)), encoding="utf-8")
+        assert log.stat().st_size > 65536
+        original_paths = {path.relative_to(project) for path in project.rglob("*")}
+        for completed in (300, 300, 301):
+            if completed == 301:
+                with log.open("a", encoding="utf-8") as output:
+                    output.write("✔ [301/50000] Built M0300 (1s)\n")
+                (artifacts / "M0300.olean").write_text("fresh")
+                original_paths.add(Path(".lake/build/lib/lean/M0300.olean"))
+            master, slave = os.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH",38,111,0,0))
+            process = subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
+            captured = bytearray()
+            try:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.05)[0]:
+                        captured.extend(os.read(master, 65536))
+                        if f"{completed} / 320" in screen_text(captured):
+                            break
+                else:
+                    raise AssertionError(f"Restart did not restore {completed} completions: {screen_text(captured)}")
+                os.write(master, b"q")
+                deadline = time.monotonic() + 3
+                while process.poll() is None and time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.05)[0]:
+                        os.read(master, 65536)
+                assert process.poll() == 0
+                assert {path.relative_to(project) for path in project.rglob("*")} == original_paths
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                os.close(master)
+                os.close(slave)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 //! Bounded, read-only estimates, never a replacement for Lake's build plan.
 use crate::monitor::{LogTail, Snapshot};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -10,6 +10,43 @@ use std::time::{Instant, SystemTime};
 const MAX_MODULES: usize = 20_000;
 const MAX_ENTRIES: usize = 100_000;
 const HEADER_BYTES: u64 = 16_384;
+
+struct Replay {
+    file: File,
+    position: u64,
+    pending: Vec<u8>,
+}
+
+impl Replay {
+    fn read_to(
+        &mut self,
+        end: u64,
+        budget: u64,
+        mut record: impl FnMut(&str),
+    ) -> std::io::Result<()> {
+        let limit = end.min(self.position.saturating_add(budget));
+        let mut bytes = [0u8; 16384];
+        while self.position < limit {
+            let length = ((limit - self.position) as usize).min(bytes.len());
+            let read = self.file.read(&mut bytes[..length])?;
+            if read == 0 {
+                break;
+            }
+            self.position += read as u64;
+            for byte in &bytes[..read] {
+                if *byte == b'\n' || *byte == b'\r' {
+                    record(&crate::monitor::clean(&String::from_utf8_lossy(
+                        &self.pending,
+                    )));
+                    self.pending.clear();
+                } else if self.pending.len() < 4096 {
+                    self.pending.push(*byte);
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Estimate {
@@ -39,6 +76,9 @@ struct Plan {
     pending: HashSet<String>,
     scope: String,
     partial: bool,
+    replay: Option<Replay>,
+    compiled: HashSet<String>,
+    timings: VecDeque<f64>,
 }
 
 pub struct Estimator {
@@ -60,10 +100,9 @@ pub struct Estimator {
 
 impl Estimator {
     pub fn new(project: PathBuf) -> Self {
-        let receiver = Some(start_scan(project.clone()));
         Self {
             project,
-            receiver,
+            receiver: None,
             plan: None,
             restart: false,
             generation: None,
@@ -101,21 +140,27 @@ impl Estimator {
             if self.receiver.is_some() {
                 self.restart = true;
             } else {
-                self.receiver = Some(start_scan(self.project.clone()));
+                self.receiver = Some(start_scan(self.project.clone(), log));
             }
         }
         if self.baseline.is_none() {
             let partial = u64::from(log.visible_lines().len() > log.lines.len());
             self.baseline = Some(log.cursor().saturating_sub(partial));
         }
+        if self.receiver.is_none() && self.plan.is_none() {
+            self.receiver = Some(start_scan(self.project.clone(), log));
+        }
         if let Some(receiver) = &self.receiver {
             match receiver.try_recv() {
-                Ok(plan) => {
+                Ok(mut plan) => {
                     self.receiver = None;
                     if self.restart {
                         self.restart = false;
-                        self.receiver = Some(start_scan(self.project.clone()));
+                        self.receiver = Some(start_scan(self.project.clone(), log));
                     } else {
+                        self.completed = std::mem::take(&mut plan.compiled);
+                        self.timings = std::mem::take(&mut plan.timings);
+                        plan.pending.extend(self.completed.iter().cloned());
                         self.plan = Some(plan);
                     }
                 }
@@ -123,7 +168,7 @@ impl Estimator {
                     self.receiver = None;
                     if self.restart {
                         self.restart = false;
-                        self.receiver = Some(start_scan(self.project.clone()));
+                        self.receiver = Some(start_scan(self.project.clone(), log));
                     } else {
                         self.plan = Some(Plan {
                             scope: "source scan unavailable".into(),
@@ -158,14 +203,55 @@ impl Estimator {
                 }
             }
         }
-        self.frozen = true;
-        if self.seen.is_none()
+        if self.plan.as_ref().unwrap().replay.is_some() {
+            self.observe_file(log, now);
+        } else if self.seen.is_none()
             || self.updated != log.updated
             || self.display_cursor != Some(log.cursor())
         {
             self.observe(log, now);
         }
+        self.frozen = true;
         self.result(snapshot, now)
+    }
+
+    fn observe_file(&mut self, log: &LogTail, now: Instant) {
+        let plan = self.plan.as_mut().unwrap();
+        let mut replay = plan.replay.take().unwrap();
+        let before = self.completed.len();
+        let result = replay.read_to(log.position(), 65536, |line| {
+            let Some((module, duration)) = built_module(line) else {
+                return;
+            };
+            if !plan.known.contains_key(module) || !self.completed.insert(module.to_string()) {
+                return;
+            }
+            if !self.frozen {
+                plan.pending.insert(module.to_string());
+            } else if !plan.pending.contains(module) {
+                self.additional.insert(module.to_string());
+            }
+            if let Some(duration) = duration {
+                if self.timings.len() == 128 {
+                    self.timings.pop_front();
+                }
+                self.timings.push_back(duration);
+            }
+        });
+        if result.is_err() && !plan.scope.contains("log read failed") {
+            plan.scope.push_str("; log read failed");
+        }
+        let caught_up = replay.position >= log.position();
+        plan.replay = Some(replay);
+        if !caught_up {
+            // Catch-up speed is disk replay speed, not compiler throughput.
+            self.observations.clear();
+        } else if self.completed.len() > before {
+            if self.observations.len() == 32 {
+                self.observations.pop_front();
+            }
+            self.observations.push_back((now, self.completed.len()));
+        }
     }
 
     fn observe(&mut self, log: &LogTail, now: Instant) {
@@ -195,13 +281,14 @@ impl Estimator {
                 }
                 self.timings.push_back(duration);
             }
-            // Initial retained output calibrates timings only: it may predate
-            // this monitor or refer to an earlier run of the same log file.
-            if sequence > previous.or(self.baseline).unwrap_or(cursor)
-                && self.completed.insert(module.to_string())
-            {
-                if !plan.pending.contains(module) {
+            if self.completed.insert(module.to_string()) {
+                if !self.frozen {
+                    plan.pending.insert(module.to_string());
+                } else if !plan.pending.contains(module) {
                     self.additional.insert(module.to_string());
+                }
+                if sequence <= self.baseline.unwrap_or(cursor) {
+                    continue;
                 }
                 if self.observations.len() == 32 {
                     self.observations.pop_front();
@@ -223,12 +310,20 @@ impl Estimator {
             };
         }
         let files = plan.pending.len();
-        let completed = self
+        let completed = self.completed.len();
+        if completed > files {
+            return Estimate {
+                completed,
+                scope: "observed completions exceed source estimate".into(),
+                ..Estimate::default()
+            };
+        }
+        let initial_completed = self
             .completed
             .iter()
             .filter(|module| plan.pending.contains(*module))
             .count();
-        let remaining = files.saturating_sub(completed)
+        let remaining = files.saturating_sub(initial_completed)
             + self
                 .additional
                 .iter()
@@ -288,12 +383,46 @@ impl Estimator {
     }
 }
 
-fn start_scan(project: PathBuf) -> Receiver<Plan> {
+fn start_scan(project: PathBuf, log: &LogTail) -> Receiver<Plan> {
     let (send, receive) = mpsc::sync_channel(1);
+    let source = log.replay_file();
+    let end = log.position();
     let _ = std::thread::Builder::new()
         .name("lean-estimate".into())
         .spawn(move || {
-            let _ = send.send(scan(&project));
+            let mut plan = scan(&project);
+            match source {
+                Ok(Some(file)) => {
+                    let mut replay = Replay {
+                        file,
+                        position: 0,
+                        pending: Vec::new(),
+                    };
+                    let result = replay.read_to(end, u64::MAX, |line| {
+                        let Some((module, duration)) = built_module(line) else {
+                            return;
+                        };
+                        if !plan.known.contains_key(module)
+                            || !plan.compiled.insert(module.to_string())
+                        {
+                            return;
+                        }
+                        if let Some(duration) = duration {
+                            if plan.timings.len() == 128 {
+                                plan.timings.pop_front();
+                            }
+                            plan.timings.push_back(duration);
+                        }
+                    });
+                    if result.is_err() {
+                        plan.scope.push_str("; log replay incomplete");
+                    }
+                    plan.replay = Some(replay);
+                }
+                Err(_) => plan.scope.push_str("; log replay unavailable"),
+                Ok(None) => {}
+            }
+            let _ = send.send(plan);
         });
     receive
 }
@@ -646,6 +775,7 @@ fn scan(project: &Path) -> Plan {
                 ""
             }
         ),
+        ..Plan::default()
     }
 }
 
@@ -727,6 +857,7 @@ mod tests {
             pending: ["A", "B"].iter().map(|s| s.to_string()).collect(),
             scope: "test estimate".into(),
             partial: false,
+            ..Plan::default()
         }
     }
     fn estimator(plan: Plan) -> Estimator {
@@ -746,6 +877,117 @@ mod tests {
             timings: VecDeque::new(),
             observations: VecDeque::new(),
         }
+    }
+
+    #[test]
+    fn restarts_restore_full_log_counts_beyond_the_live_ring_and_include_fresh_outputs() {
+        let fixture = Fixture::new();
+        for i in 0..620 {
+            fixture.write(&format!("M{i:04}.lean"), "import Init\n");
+            if i < 600 {
+                fixture.write(&format!(".lake/build/lib/lean/M{i:04}.olean"), "fresh");
+            }
+        }
+        let padding = "history ".repeat(15);
+        let history = (0..600)
+            .map(|i| format!("✔ [{i}/50000] Built M{i:04} {padding}(1s)\n"))
+            .collect::<String>();
+        fixture.write("build.log", &format!("{history}✔ [900/50000] Built M0000 (1s)\n✔ [901/50000] Built M0001:c.o (1s)\n✔ [902/50000] Replayed M0002 (1s)\n✔ [903/50000] Built app (1s)\n"));
+        let mut log = LogTail::new(Some(fixture.0.join("build.log")));
+        log.refresh();
+        assert!(log.lines.len() <= 200);
+        let mut first = Estimator::new(fixture.0.clone());
+        let estimate = settle(&mut first, &log);
+        assert_eq!((estimate.completed, estimate.files), (600, Some(620)));
+        assert_eq!(estimate.remaining_seconds, Some(20.0));
+        assert!(
+            first.observations.is_empty(),
+            "Startup replay is not live throughput"
+        );
+        let mut restarted = Estimator::new(fixture.0.clone());
+        let estimate = settle(&mut restarted, &log);
+        assert_eq!((estimate.completed, estimate.files), (600, Some(620)));
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.0.join("build.log"))
+            .unwrap()
+            .write_all(b"[904/50000] Built M0600 (1s)\n")
+            .unwrap();
+        fixture.write(".lake/build/lib/lean/M0600.olean", "fresh");
+        log.refresh();
+        assert_eq!(settle(&mut first, &log).completed, 601);
+        let mut again = Estimator::new(fixture.0.clone());
+        let estimate = settle(&mut again, &log);
+        assert_eq!((estimate.completed, estimate.files), (601, Some(620)));
+    }
+
+    fn settle(estimator: &mut Estimator, log: &LogTail) -> Estimate {
+        for _ in 0..5000 {
+            let result = estimator.refresh(log, &Snapshot::default());
+            if estimator.receiver.is_none()
+                && estimator.plan.as_ref().is_some_and(|plan| {
+                    plan.replay
+                        .as_ref()
+                        .map(|r| r.position >= log.position())
+                        .unwrap_or(true)
+                })
+            {
+                return result;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("Estimator did not catch up to the log");
+    }
+
+    #[test]
+    fn replay_handoff_does_not_lose_a_burst_larger_than_the_tail_ring() {
+        let fixture = Fixture::new();
+        for i in 0..600 {
+            fixture.write(&format!("M{i:04}.lean"), "import Init\n");
+        }
+        fixture.write("build.log", "");
+        let mut log = LogTail::new(Some(fixture.0.join("build.log")));
+        log.refresh();
+        let mut estimator = Estimator::new(fixture.0.clone());
+        estimator.refresh(&log, &Snapshot::default());
+        fixture.write(
+            "build.log",
+            &(0..600)
+                .map(|i| format!("[{i}/10000] Built M{i:04} {}(1s)\n", "burst ".repeat(20)))
+                .collect::<String>(),
+        );
+        log.refresh();
+        assert_eq!(settle(&mut estimator, &log).completed, 600);
+        assert!(
+            estimator.observations.len() <= 1,
+            "Disk catch-up must not fabricate compiler throughput"
+        );
+    }
+
+    #[test]
+    fn replay_preserves_partial_records_and_resets_on_a_new_log_generation() {
+        let fixture = Fixture::new();
+        fixture.write("A.lean", "import Init\n");
+        fixture.write("B.lean", "import Init\n");
+        fixture.write("build.log", "[1/3] Built A (1s)");
+        let mut log = LogTail::new(Some(fixture.0.join("build.log")));
+        log.refresh();
+        let mut estimator = Estimator::new(fixture.0.clone());
+        assert_eq!(settle(&mut estimator, &log).completed, 0);
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.0.join("build.log"))
+            .unwrap()
+            .write_all(b"\n[2/3] Built B (1s)\n")
+            .unwrap();
+        log.refresh();
+        assert_eq!(settle(&mut estimator, &log).completed, 2);
+        fs::rename(fixture.0.join("build.log"), fixture.0.join("previous.log")).unwrap();
+        fixture.write("build.log", "[1/3] Built B (1s)\n");
+        log.refresh();
+        assert_eq!(settle(&mut estimator, &log).completed, 1);
     }
 
     #[test]
@@ -853,7 +1095,7 @@ mod tests {
         history.push("✔ [1/8] Built A (6s)".into());
         let estimate = seeded.refresh_at(&history, &Snapshot::default(), now);
         assert_eq!(estimate.total_seconds, Some(12.0));
-        assert_eq!(estimate.remaining_seconds, Some(12.0));
+        assert_eq!(estimate.remaining_seconds, Some(6.0));
 
         let mut live = estimator(plan());
         let mut log = LogTail::default();
@@ -871,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_history_only_seeds_timings_then_actual_completions_calibrate_eta() {
+    fn initial_history_restores_counts_and_duplicate_records_do_not_add_completions() {
         let mut estimator = estimator(plan());
         let mut log = LogTail::default();
         for line in [
@@ -883,30 +1125,15 @@ mod tests {
         }
         let now = Instant::now();
         let result = estimator.refresh_at(&log, &Snapshot::default(), now);
-        assert_eq!((result.files, result.completed), (Some(2), 0));
-        assert_eq!(result.total_seconds, Some(4.0));
+        assert_eq!((result.files, result.completed), (Some(3), 3));
+        assert_eq!(result.total_seconds, Some(6.0));
+        assert_eq!(result.remaining_seconds, Some(0.0));
+        assert!(estimator.observations.is_empty());
         log.push("✔ [4/8] Built A (2s)".into());
-        assert_eq!(
-            estimator
-                .refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(1))
-                .completed,
-            1
-        );
-        log.push("✔ [5/8] Built B (2s)".into());
-        let done = estimator.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(3));
-        assert_eq!(done.remaining_seconds, Some(0.0));
-        assert_eq!(done.total_seconds, Some(4.0));
-        log.push("✔ [6/8] Built C (2s)".into());
-        let expanded =
-            estimator.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(4));
-        assert_eq!(
-            (
-                expanded.files,
-                expanded.completed,
-                estimator.additional.len()
-            ),
-            (Some(2), 2, 1)
-        );
+        let repeated =
+            estimator.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(1));
+        assert_eq!((repeated.files, repeated.completed), (Some(3), 3));
+        assert!(estimator.observations.is_empty());
     }
 
     #[test]
@@ -927,7 +1154,7 @@ mod tests {
         let extra = estimator.refresh_at(&log, &snapshot, now + Duration::from_secs(1));
         assert_eq!(
             (extra.files, extra.completed, estimator.additional.len()),
-            (Some(2), 0, 1)
+            (Some(2), 1, 1)
         );
         log.push("✔ [9/9000] Built A (2s)".into());
         log.push("✔ [10/99999] Built B (2s)".into());
@@ -939,7 +1166,7 @@ mod tests {
                 finished.completed,
                 estimator.additional.len()
             ),
-            (Some(2), 2, 1)
+            (None, 3, 1)
         );
     }
 
@@ -959,7 +1186,7 @@ mod tests {
         log.push("✔ [2/8] Built A (1s)".into());
         send.send(plan()).unwrap();
         let result = estimator.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(1));
-        assert_eq!((result.files, result.completed), (Some(2), 1));
+        assert_eq!((result.files, result.completed), (Some(3), 2));
     }
 
     #[test]

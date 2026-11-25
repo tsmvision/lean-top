@@ -1040,7 +1040,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     );
     let progress_y = b + 2;
     if let Some(total) = state.estimate.files {
-        let completed = state.estimate.completed.min(total);
+        let completed = state.estimate.completed;
         let label = format!("{completed} / {total}");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
@@ -1063,7 +1063,12 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             (w - 2).saturating_sub(x),
         );
     } else {
-        frame.text(2, progress_y, "— / —", Color::Muted, inside);
+        let label = if state.estimate.completed == 0 {
+            "— / —".into()
+        } else {
+            format!("{} / —", state.estimate.completed)
+        };
+        frame.text(2, progress_y, &label, Color::Muted, inside);
     }
     let lines = log.visible_lines();
     let latest = lines.iter().rev().find(|line| progress(line).is_some());
