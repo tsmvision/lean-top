@@ -1,4 +1,4 @@
-use crate::monitor::{clean, LogTail, Snapshot};
+use crate::monitor::{clean, progress, LogTail, Snapshot};
 use std::collections::VecDeque;
 use std::fmt::Write;
 
@@ -447,36 +447,34 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         Color::Text,
         w - 17,
     );
-    if let Some((done, total)) = log.progress {
-        let label = format!("{done} / {total}");
+    if let Some((reported, total)) = log.current_progress() {
+        let label = format!("{reported} / {total} jobs");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
             2,
             b + 3,
             bar_width,
-            done as f64 / total as f64 * 100.0,
+            reported as f64 / total as f64 * 100.0,
             Color::Cyan,
         );
-        frame.text(4 + bar_width, b + 3, &label, Color::Text, label.len());
+        let x = if bar_width == 0 { 2 } else { 4 + bar_width };
+        frame.text(x, b + 3, &label, Color::Text, (w - 2).saturating_sub(x));
     } else {
         frame.text(
             2,
             b + 3,
-            "Progress unavailable · waiting for Lake [done/total] output",
+            "Lake jobs unknown · waiting for build status output",
             Color::Muted,
             inside,
         );
     }
     let lines = log.visible_lines();
-    let latest = lines
-        .iter()
-        .rev()
-        .find(|line| line.contains("Building ") || line.contains("Built "));
+    let latest = lines.iter().rev().find(|line| progress(line).is_some());
     frame.text(
         2,
         b + 4,
         &format!(
-            "Latest target  {}",
+            "Latest event   {}",
             latest.map(|s| s.as_str()).unwrap_or("—")
         ),
         Color::Text,
@@ -607,7 +605,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             "",
             "Metrics and processes are server-wide.",
             "Storage is the project filesystem capacity.",
-            "Build progress is parsed from the log only.",
+            "Lake job counts are not compiled-file counts.",
             "Compilation does not certify a theorem proof.",
         ];
         let box_width = 48.min(w - 4);

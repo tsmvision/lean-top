@@ -10,7 +10,7 @@ fn exactly_64_kib_append_keeps_first_complete_line() {
     let path = fixture.write("build.log", "initial\n");
     let mut log = LogTail::new(Some(path));
     log.refresh();
-    let mut output = b"[1/2] first complete line\n".to_vec();
+    let mut output = b"[1/2] Built first complete line\n".to_vec();
     output.resize(65535, b'x');
     output.push(b'\n');
     fixture.append("build.log", &output);
@@ -249,24 +249,88 @@ fn log_carriage_returns_and_pending_line_are_visible() {
 #[test]
 fn progress_accepts_lake_counts_and_rejects_invalid_totals() {
     assert_eq!(progress("✔ [ 12 / 24 ] Built Riemann.Zeta"), Some((12, 24)));
-    assert_eq!(progress("[trace] [24/24] done"), Some((24, 24)));
-    assert_eq!(progress("[0/10] starting"), Some((0, 10)));
+    assert_eq!(progress("⣾ [0/10] Running Riemann.Zeta"), Some((0, 10)));
+    assert_eq!(
+        progress("✔ [3/5] (Optional) Built Riemann.Zeta:c.o"),
+        Some((3, 5))
+    );
+    for action in [
+        "Ran",
+        "Running",
+        "Reused",
+        "Reusing",
+        "Replayed",
+        "Replaying",
+        "Unpacked",
+        "Unpacking",
+        "Fetched",
+        "Fetching",
+        "Built",
+        "Building",
+        "Canceled",
+    ] {
+        assert_eq!(progress(&format!("[4/10] {action} target")), Some((4, 10)));
+    }
     for line in [
-        "[1/0]",
-        "[11/10]",
-        "[-1/10]",
-        "[a/10]",
+        "[1/0] Built X",
+        "[11/10] Built X",
+        "[-1/10] Built X",
+        "[a/10] Built X",
         "[1/10",
         "ordinary message",
+        "[trace] [24/24] done",
+        "warning: proof step [9/10] Built X",
+        "example.lean:12: error: [9/10] Built X",
+        "[3/5] arbitrary diagnostic",
+        "[+1/2] Built X",
+        "[1/2] BuildingSomething",
     ] {
         assert_eq!(progress(line), None, "unexpected progress in {line:?}");
     }
 }
 
 #[test]
+fn lake_job_total_can_grow_without_turning_into_a_file_count() {
+    let fixture = Fixture::new();
+    let path = fixture.write("build.log", "✔ [1/3] Built Riemann.Zeta\n");
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    assert_eq!(log.progress, Some((1, 3)));
+    fixture.append("build.log", "✔ [2/8] Built Riemann.Zeta:c.o\n".as_bytes());
+    log.refresh();
+    assert_eq!(
+        log.progress,
+        Some((2, 8)),
+        "Lake's latest denominator is authoritative"
+    );
+    fixture.append("build.log", b"warning: example ratio [99/100]\n");
+    log.refresh();
+    assert_eq!(
+        log.progress,
+        Some((2, 8)),
+        "diagnostic fractions must not replace Lake counters"
+    );
+}
+
+#[test]
+fn running_progress_is_visible_before_a_line_delimiter() {
+    let fixture = Fixture::new();
+    let path = fixture.write("build.log", "✔ [1/10] Built X\n⣾ [2/");
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    assert_eq!(log.current_progress(), Some((1, 10)));
+    fixture.append("build.log", b"20] Running Y");
+    log.refresh();
+    assert_eq!(log.current_progress(), Some((2, 20)));
+    fixture.append("build.log", b"\r");
+    log.refresh();
+    assert_eq!(log.current_progress(), Some((2, 20)));
+}
+
+#[test]
 fn log_rotation_discards_previous_run_and_progress() {
     let fixture = Fixture::new();
-    let path = fixture.write("build.log", "[9/10] old\nunfinished");
+    let path = fixture.write("build.log", "[9/10] Built old\nunfinished");
     let mut log = LogTail::new(Some(path));
     log.refresh();
     fs::rename(fixture.0.join("build.log"), fixture.0.join("build.log.1")).unwrap();
@@ -279,7 +343,7 @@ fn log_rotation_discards_previous_run_and_progress() {
 #[test]
 fn log_truncation_resets_pending_bytes_and_progress() {
     let fixture = Fixture::new();
-    let path = fixture.write("build.log", "[9/10] old output\nunfinished");
+    let path = fixture.write("build.log", "[9/10] Built old output\nunfinished");
     let mut log = LogTail::new(Some(path));
     log.refresh();
     fixture.write("build.log", "fresh\n");
@@ -294,7 +358,7 @@ fn log_missing_file_reports_error_then_recovers_without_restarting_monitor() {
     let mut log = LogTail::new(Some(fixture.0.join("later.log")));
     log.refresh();
     assert!(log.error.is_some());
-    fixture.write("later.log", "[1/2] ready\n");
+    fixture.write("later.log", "[1/2] Built ready\n");
     log.refresh();
     assert!(log.error.is_none());
     assert_eq!(log.progress, Some((1, 2)));
@@ -323,14 +387,14 @@ fn log_keeps_recent_window_and_bounds_unterminated_lines() {
 fn log_starts_at_recent_tail_of_large_file() {
     let fixture = Fixture::new();
     let mut text = "historical line\n".repeat(20_000);
-    text.push_str("[5/8] latest module\n");
+    text.push_str("[5/8] Built latest module\n");
     let path = fixture.write("build.log", text);
     let mut log = LogTail::new(Some(path));
     log.refresh();
     assert_eq!(log.progress, Some((5, 8)));
     assert_eq!(
         log.lines.back().map(String::as_str),
-        Some("[5/8] latest module")
+        Some("[5/8] Built latest module")
     );
     assert!(log.lines.len() <= 200);
     assert!(log.pending.len() <= 4096);

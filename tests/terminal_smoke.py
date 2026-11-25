@@ -91,6 +91,15 @@ def main():
         os.mkfifo(fifo)
         rejected = subprocess.check_output([binary, "--snapshot", "--log", fifo], timeout=5)
         assert b"regular file" in rejected, "FIFO log should be rejected without blocking"
+        log_path = Path(directory) / "build.log"
+        log_path.write_text(
+            "✔ [1/3] Built Example\n"
+            "warning: diagnostic fraction [99/100]\n"
+            "⣾ [2/20] Running Example:c.o",
+            encoding="utf-8",
+        )
+        observed = subprocess.check_output([binary, "--snapshot", "--log", str(log_path)], timeout=5)
+        assert b"2 / 20 jobs" in observed, "Use Lake's changing job total, including pending spinner output"
     for key in (b"q", b"\x03", None):
         exercise(binary, key)
     if sys.platform.startswith("linux"):

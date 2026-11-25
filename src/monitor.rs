@@ -249,20 +249,53 @@ pub fn clean(text: &str) -> String {
 }
 
 pub fn progress(line: &str) -> Option<(u64, u64)> {
-    for part in line.split('[').skip(1) {
-        let Some((inside, _)) = part.split_once(']') else {
-            continue;
-        };
-        let Some((done, total)) = inside.split_once('/') else {
-            continue;
-        };
-        if let (Ok(done), Ok(total)) = (done.trim().parse(), total.trim().parse()) {
-            if total > 0 && done <= total {
-                return Some((done, total));
-            }
+    // Lake reports job counters, not source-file counts. Match the status
+    // record at the start of a sanitized line; diagnostic fractions are unrelated.
+    let mut line = line.trim_start();
+    if let Some(icon) = line.chars().next() {
+        if matches!(icon, '✔' | 'ℹ' | '⚠' | '✖') || ('\u{2800}'..='\u{28ff}').contains(&icon)
+        {
+            line = line[icon.len_utf8()..]
+                .trim_start_matches('\u{fe0f}')
+                .trim_start();
         }
     }
-    None
+    let (counts, caption) = line.strip_prefix('[')?.split_once(']')?;
+    let (reported, total) = counts.split_once('/')?;
+    let (reported, total) = (reported.trim(), total.trim());
+    if ![reported, total]
+        .iter()
+        .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let caption = caption.trim_start();
+    let caption = caption
+        .strip_prefix("(Optional)")
+        .unwrap_or(caption)
+        .trim_start();
+    let mut words = caption.split_whitespace();
+    if !matches!(
+        words.next()?,
+        "Ran"
+            | "Running"
+            | "Reused"
+            | "Reusing"
+            | "Replayed"
+            | "Replaying"
+            | "Unpacked"
+            | "Unpacking"
+            | "Fetched"
+            | "Fetching"
+            | "Built"
+            | "Building"
+            | "Canceled"
+    ) || words.next().is_none()
+    {
+        return None;
+    }
+    let (reported, total): (u64, u64) = (reported.parse().ok()?, total.parse().ok()?);
+    (total > 0 && reported <= total).then_some((reported, total))
 }
 
 #[derive(Default)]
@@ -376,6 +409,11 @@ impl LogTail {
     pub fn cursor(&self) -> u64 {
         self.lines_added
             .saturating_add(u64::from(!self.pending.is_empty()))
+    }
+
+    pub fn current_progress(&self) -> Option<(u64, u64)> {
+        // A live spinner may not have emitted its trailing CR/newline yet.
+        progress(&clean(&String::from_utf8_lossy(&self.pending))).or(self.progress)
     }
 
     pub fn visible_lines(&self) -> Vec<String> {

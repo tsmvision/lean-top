@@ -53,7 +53,9 @@ The monitor does not create the log or launch the build. Check that the build is
 
 ## Progress is missing, old, or apparently complete
 
-The progress bar requires a valid `[done/total]` pair in a completed log record. Output without that format remains visible in the log but supplies no percentage. The “Latest target” label is derived from recent retained `Building`/`Built` lines, so it can be absent or refer to a previous target.
+The progress bar requires a recognized Lake status record such as `✔ [3/8] Built Foo` or `⣾ [3/8] Running Foo`. A complete status prefix can update the display before a newline arrives. Arbitrary `[n/m]` text in diagnostics does not update the counter. “Latest event” is a recent retained Lake status record; it does not identify the only file currently compiling.
+
+The displayed numbers count Lake jobs, not `.lean` files. A source file may generate several jobs, cached/replayed work can be reported, and dependency discovery can increase the total during a build. Do not compare the denominator to a recursive source-file count or assume it is fixed. Before the first recognized status record arrives, the count is unknown. The monitor does not launch a second build or scan the source tree to invent a file total.
 
 Progress is read from log text and can outlive the build process. It does not indicate an exit code, successful proof checking, absence of `sorry`, or validity of the Riemann hypothesis proof. Use the build's actual exit status and your Lean verification workflow for those conclusions.
 

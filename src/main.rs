@@ -104,7 +104,7 @@ fn demo_log(log: &mut LogTail, tick: u64) {
     }
     if tick % 3 == 0 {
         log.push(format!(
-            "⠋ [{done}/680] Building RiemannHypothesis.ExplicitFormula"
+            "⣾ [{done}/680] Running RiemannHypothesis.ExplicitFormula"
         ));
         log.updated = Some(Instant::now());
     }

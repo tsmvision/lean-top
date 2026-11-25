@@ -38,7 +38,9 @@ Reads are limited to the most recent 64 KiB window. If the unread gap exceeds th
 
 Newline and carriage return both delimit records, supporting Lake progress updates. Raw pending bytes preserve ordinary UTF-8 sequences split between file reads. Completed records are decoded with replacement for invalid bytes. The sanitizer strips terminal control characters and CSI/OSC escape sequences before rendering. Tabs expand to four spaces.
 
-Progress parsing accepts valid nonnegative `[done/total]` pairs with a positive total and `done <= total`. Progress updates on completed records. It is a log observation, not an exit-status or theorem-verification protocol. A recent retained line containing `Building ` or `Built ` supplies the latest-target label.
+Progress parsing recognizes a leading Lake status record: an optional status icon, `[reported/total]`, an optional `(Optional)` marker, and a known action verb followed by its caption. Arbitrary diagnostic fractions are ignored. The numbers must be nonnegative with a positive total and `reported <= total`. A complete status prefix in the current partial line can update the display before its trailing newline or carriage return.
+
+The counters are Lake job observations, not completed source-file counts. Dependency discovery can grow the denominator, and multiple facets can contribute jobs for one module. The raw numbers are preserved without an inferred offset or a source-tree scan. “Latest event” displays a retained recognized status record. In particular, Lake can use `Building` in a failed completed-job report; it must not be interpreted as evidence of a currently compiling file. See the official [build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164) and [job action verbs](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Job/Basic.lean#L24-L58). Neither a job counter nor a caption is an exit-status or theorem-verification protocol.
 
 ## Terminal rendering
 

@@ -66,8 +66,8 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
 
 BUILD
 ● ACTIVE    3 Lean/Lake processes · server-wide
-████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680
-Latest target  ⠋ [342/680] Building RiemannHypothesis.ExplicitFormula
+████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680 jobs
+Latest event   ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
 PROCESSES · server-wide
 PID      NAME      MEMORY       COMMAND
@@ -78,7 +78,7 @@ PID      NAME      MEMORY       COMMAND
 BUILD LOG · FOLLOW ON
 ✔ [340/680] Built RiemannHypothesis.ZetaBounds
 warning: ExplicitFormula.lean:128: unused variable `h`
-⠋ [342/680] Building RiemannHypothesis.ExplicitFormula
+⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
 q Quit   Space Pause   ↑↓/jk Scroll   f Follow   ? Help
 ```
@@ -119,7 +119,9 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
 - **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. The full screen shows the first three. They are not filtered by project.
-- **ACTIVE/IDLE** reflects whether any of those processes were detected. Progress is the latest valid `[done/total]` count in the log, and “Latest target” is a recent retained `Building`/`Built` line.
+- **ACTIVE/IDLE** reflects whether any of those processes were detected. **Lake jobs** preserves the latest `[reported/total]` pair from a recognized Lake status record, including a running spinner before its trailing newline. “Latest event” shows a recent retained Lake status record.
+
+Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).
 
 Log progress can belong to an earlier run and does not supply a build exit code. A full progress bar does not establish a successful build or a valid theorem proof. This tool does not inspect Lean declarations, axioms, `sorry`, or proof artifacts.
 
