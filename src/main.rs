@@ -145,19 +145,16 @@ fn demo_log(log: &mut LogTail, tick: u64) {
 }
 
 fn demo_estimate(tick: u64) -> Estimate {
-    let completed = (34 + tick as usize / 6).min(120);
+    let reported = 342 + (tick / 3) % 300;
     Estimate {
-        files: Some(120),
-        completed,
         total_seconds: Some(180.0),
-        remaining_seconds: Some((120 - completed) as f64 * 1.5),
-        scope: "demo estimate".into(),
+        remaining_seconds: Some((680 - reported) as f64 / 680.0 * 180.0),
     }
 }
 
 fn run(options: Options) -> io::Result<()> {
     let mut sampler = Sampler::new(options.project.clone());
-    let mut estimator = (!options.demo).then(|| Estimator::new(options.project.clone()));
+    let mut estimator = Estimator::default();
     let mut log = LogTail::new(options.log.clone());
     let mut state = ViewState {
         follow: true,
@@ -185,7 +182,7 @@ fn run(options: Options) -> io::Result<()> {
     state.estimate = if options.demo {
         demo_estimate(0)
     } else {
-        estimator.as_mut().unwrap().refresh(&log, &snapshot)
+        estimator.refresh(&log)
     };
 
     if options.snapshot {
@@ -193,7 +190,7 @@ fn run(options: Options) -> io::Result<()> {
         if !options.demo {
             std::thread::sleep(Duration::from_millis(100));
             snapshot = sampler.sample();
-            state.estimate = estimator.as_mut().unwrap().refresh(&log, &snapshot);
+            state.estimate = estimator.refresh(&log);
         }
         let frame = ui::render(
             &View {
@@ -346,7 +343,7 @@ fn run(options: Options) -> io::Result<()> {
                 state.estimate = if options.demo {
                     demo_estimate(state.tick)
                 } else {
-                    estimator.as_mut().unwrap().refresh(&log, &snapshot)
+                    estimator.refresh(&log)
                 };
                 if let Some((old_lines, old_cursor, old_generation)) = old_log {
                     // Keep the viewed window stable while new lines arrive.

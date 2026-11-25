@@ -27,7 +27,7 @@ If `lean-top` was installed with Cargo, run `cargo install --path . --force --of
 
 ## The default project or log is not the one expected
 
-Without `--project`, the project is your launch directory (`.`), used for estimates, storage, and the header. It does not restrict the server-wide process list. Without `--log`, the log is selected independently from `~/logs`, using filename order rather than freshness. For an unambiguous pairing, pass both absolute paths:
+Without `--project`, the project is your launch directory (`.`), used for storage and the header. It does not restrict the server-wide process list. Without `--log`, the log is selected independently from `~/logs`, using filename order rather than freshness. For an unambiguous pairing, pass both absolute paths:
 
 ```sh
 lean-top --project /srv/riemann --log /srv/riemann/build.log
@@ -75,9 +75,9 @@ If `--log` is omitted, the application chooses the filename-sorted first regular
 
 ## Progress is missing, old, or apparently complete
 
-The numerator is the distinct recognized Lean-module completion count from the entire selected log, including startup history. The denominator is the union of those historical completions and the initial stale-file estimate. Its denominator stays unchanged during the same detected build run. Later known files outside that baseline do not enlarge the denominator, and no extra-file counter is displayed. A full initial-file bar does not mean additional work or the whole build has finished.
+Build uses the latest recognized Lake `[reported/total]` pair directly for both the counter and progress bar. A status such as `✔ [16000/20000] Built Foo` displays `16000 / 20000`; `⣾ [16010/30000] Running Foo` changes it to `16010 / 30000`. No source-file counting, `+1`, frozen denominator, or extra-file adjustment is performed.
 
-The separate `Lake jobs:` reference reads recognized status records such as `✔ [3/8] Built Foo` or `⣾ [3/8] Running Foo`. Its counters may grow as Lake discovers jobs. They include non-Lean work and never supply the file progress bar. If source analysis cannot produce a file estimate, unknown counts display `— / —`; a known completed count with an invalidated total displays `completed / —`. Lake job numbers never replace file counts.
+These are Lake job observations, which can include more than Lean source compilation. Their denominator can grow as Lake discovers work. If the recent log tail contains no recognized pair, Build displays `— / —` until a status arrives.
 
 Progress is read from log text and can outlive the build process. It does not indicate an exit code, successful proof checking, absence of `sorry`, or validity of the Riemann hypothesis proof. Use the build's actual exit status and your Lean verification workflow for those conclusions.
 
@@ -103,17 +103,15 @@ The normal table intentionally shows only `TYPE`, `MEMORY`, and `TARGET`. Click 
 
 While details are open, arrows and `j`/`k` scroll the dialog instead of logs, and wheel events do not operate the background panels. `Esc` closes help first if it is layered over details. Close details before resizing sections. `q` still exits the monitor rather than just closing the dialog.
 
-## Compile estimates are unavailable or different from Lake jobs
+## Estimated time is waiting or changes
 
-Estimated Lean files are separate from the Lake job counter. The background source/import scan needs a readable Lean project under `--project`; a folder containing no local Lean sources has no file estimate. One recognized source-module duration is sufficient for a rough time estimate; two distinct live completions at least 0.5 seconds apart can supply throughput after at least one second of observation. Live throughput takes precedence over duration-based estimates. Replayed and native jobs do not train Lean compilation time.
+Time is calculated from changes in Lake's reported counter, using at most 32 observations. Two distinct counter values and at least one second of monitoring are needed. If no log is selected, the row says `no build log (set --log)`; otherwise it waits for Lake progress or progress updates. Existing module durations are not converted into a made-up per-file speed.
 
-`Scanning` means the background analysis has not returned yet; `Unavailable` means it could not supply a useful source estimate. Without a selected log, the time row says `no build log (set --log)`; with a selected log but no usable timing data, it says `no timing data in build log`. Check that the selected log contains matching Lean module completions. The monitor does not substitute a fixed seconds-per-file constant. An apparently surprising zero can mean standard artifacts look current; later known compilation can affect the time forecast without increasing that fixed initial file count. The file-counter numerator includes recognized completions from before monitoring began. Startup replay runs in the background; it is independent of the 200-record display ring.
-
-Estimates are approximate: custom build directories, generated sources, dynamic target configuration, and Lake's hash/artifact cache can differ from a source/standard-output timestamp estimate. The scope label indicates low confidence or a partial scan. Joining a build midway or reading a bounded tail cannot recover its true start time and all earlier work. Use a fresh, explicitly selected log for each run and the correct project directory; no second build is launched for estimation.
+Both total and remaining time are approximate. They can change when jobs slow down, parallelism changes, or Lake discovers a larger denominator. The speed resets when the counter decreases or the log rotates/truncates. Restarting also resets time observations, while the displayed Build counts still come directly from Lake. No source tree, import graph, `.olean` artifact, or cache directory is scanned.
 
 ## Some processes or estimate fields are not visible
 
-Automatic process height attempts to show the complete matching list, but it cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the automatic viewport. Restart to restore the default allocation. Build reserves four rows so status, file progress, and the estimated total/remaining time remain visible even when crowded or manually shrunk. The file counter shows only `completed / total`, with no `files`, `fixed`, or `extra` suffix and no duplicate file-summary row. Expanding Build reveals log-source information and latest-event text. The process table remains unavailable in compact mode.
+Automatic process height attempts to show the complete matching list, but it cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the automatic viewport. Restart to restore the default allocation. Build reserves four rows so status, Lake progress, and the estimated total/remaining time remain visible even when crowded or manually shrunk. The Build counter shows only `reported / total`, with no `files`, `fixed`, or `extra` suffix and no duplicate file-summary row. Expanding Build reveals log-source information and latest-event text. The process table remains unavailable in compact mode.
 
 ## Mouse scrolling does not work
 
@@ -180,8 +178,6 @@ Recognized Lake progress lines normalize the spinner glyph and suppress consecut
 
 Scrolling, terminal resizing, overlays, and automatic pane movement when process counts change can redraw affected log content. These are viewport changes. If repeated updates remain at a fixed viewport, check whether the selected log contains genuinely changing counters or text rather than only spinner animation.
 
-## Completed files reset or differ after restarting
+## Build counts differ after restarting
 
-The monitor restores distinct source-module `Built` completions from the whole selected log, then reads new records from the replay byte watermark. Restarting with the same `--project` and unchanged build log restores that count; it does not start a new observation-only counter. Historical completions with fresh `.olean` artifacts also join the estimated total without double counting stale candidates. Startup replay can take time for a large file, and numeric counts appear once that background replay completes.
-
-Use one log file per build and verify `--log` selects the same file on restart. Appending multiple builds to one file combines their distinct modules. Truncation, rotation, deletion, missing completion records, or unavailable/missing source modules can prevent restoration of the earlier count. Source/import scan limits still apply; native facets, replayed work, and non-module targets are excluded. Replaying the log does not run Lake or write build artifacts.
+The application does not maintain a separate compiled-file counter. It reads Lake's latest recognized `[reported/total]` from the selected log's recent 64 KiB. Restarting with the same unchanged log tail restores the same pair. If a different file was selected, the log was rotated/truncated, or the tail has no recognized progress, the displayed pair can differ or remain unknown. An unrelated diagnostic fraction is ignored. Source modules and `.olean` files do not affect the counter.

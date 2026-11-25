@@ -475,32 +475,6 @@ pub struct LogTail {
 }
 
 impl LogTail {
-    pub fn replay_file(&self) -> std::io::Result<Option<File>> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let Some(path) = &self.path else {
-            return Ok(None);
-        };
-        #[cfg(target_os = "linux")]
-        const NONBLOCK: i32 = 0x800;
-        #[cfg(not(target_os = "linux"))]
-        const NONBLOCK: i32 = 0x4;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(NONBLOCK)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || self.identity != Some((metadata.dev(), metadata.ino()))
-            || metadata.len() < self.position
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "log changed before replay",
-            ));
-        }
-        Ok(Some(file))
-    }
-
     pub fn history_before(&self, end: Option<u64>) -> std::io::Result<LogHistory> {
         let end = end.unwrap_or(self.position).min(self.position);
         self.history_window(end.saturating_sub(65536), end, true)

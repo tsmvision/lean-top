@@ -1,6 +1,6 @@
 # lean-top
 
-A lightweight terminal dashboard for Lean builds on 64-bit Ubuntu Linux. It shows server resources, inspectable Lean/Lake processes, Lake job progress, approximate Lean compilation counts and times, and wrapping build logs. Mouse wheels navigate individual panels, and dragging section dividers adjusts their heights.
+A lightweight terminal dashboard for Lean builds on 64-bit Ubuntu Linux. It shows server resources, inspectable Lean/Lake processes, Lake-reported build progress, estimated build times, and wrapping build logs. Mouse wheels navigate individual panels, and dragging section dividers adjusts their heights.
 
 Written in Rust with **no Cargo dependencies**. The default refresh interval is **500 ms**. The monitor reads system information and an existing log; it does not launch, stop, or modify your build.
 
@@ -66,7 +66,7 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log
 
 `tee build.log` truncates the file at the start of a run. Prefer a unique log filename for each run when retaining logs or switching between builds. Pass that same filename to `--log`.
 
-`--project` defaults to the current directory (`.`), selects the source/import scope for estimates, selects the filesystem for storage capacity, and supplies the directory shown in the header. It does not filter the server-wide resource metrics or process list. A relative `--log` path is resolved against the monitor's working directory, independently of `--project`. An explicitly selected log may be created after the monitor starts; missing files are retried.
+`--project` defaults to the current directory (`.`), selects the filesystem for storage capacity, and supplies the directory shown in the header. It does not filter the server-wide resource metrics or process list. A relative `--log` path is resolved against the monitor's working directory, independently of `--project`. An explicitly selected log may be created after the monitor starts; missing files are retried.
 
 When `--log` is omitted, startup selects the first regular, non-hidden `*.log` file in `~/logs`, ordered by filename. This is a nonrecursive lookup and does not mean the newest file. An explicit `--log` overrides discovery. If no matching file or home directory is available, system monitoring still starts without a log. Demo mode never selects a real log automatically.
 
@@ -97,10 +97,10 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
 
 BUILD
 ● ACTIVE    6 Lean/Lake processes · server-wide
-████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       34 / 120
-Est. time ≈ 3m 0s total · ≈ 2m 9s left
+████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680
+Est. time ≈ 3m 0s total · ≈ 1m 29s left
 Log: simulated build.log · last read 12:34:56 UTC
-Lake jobs: 342/680 · ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
+Latest: Running RiemannHypothesis.ExplicitFormula
 
 PROCESSES · 1-6 / 6
 TYPE     MEMORY       TARGET
@@ -119,7 +119,7 @@ warning: ExplicitFormula.lean:128: unused variable `h`
 q Quit  Space Pause  Wheel Scroll  Click/p Details  ↑↓ Logs  f Follow  ? Help
 ```
 
-The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. Compact mode hides the process table and initially shows core resource values; expanding Resources reveals additional details. Build always retains its status, fixed file progress, and estimated total/remaining time row. The file counter uses only `completed / total`, without `files`, `fixed`, `extra`, or a duplicate file-summary line. Unknown counts appear as `— / —`. Resizing can hide log-source information and latest-event captions.
+The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. Compact mode hides the process table and initially shows core resource values; expanding Resources reveals additional details. Build always retains its status, Lake progress, and estimated total/remaining time row. The Build counter uses only `reported / total`, without `files`, `fixed`, `extra`, or a duplicate file-summary line. Unknown counts appear as `— / —`. Resizing can hide log-source information and latest-event captions.
 
 Unchanged log rows stay on screen while resource metrics continue to refresh. The log's last-read time is a fixed UTC timestamp that changes only when new bytes are read, rather than a continuously advancing age counter. Scrolling, help, and terminal resizing can still redraw the affected area.
 
@@ -157,7 +157,7 @@ Hold the left mouse button on a section divider and drag up or down. Each divide
 | `PROCESSES` | Build above it and Processes below it |
 | `BUILD LOG` | Processes above it and Build Log below it; in compact mode, Build and Build Log |
 
-CPU, Memory, and Storage share one resource row and resize together. Only the application header and footer remain fixed. Minimum heights preserve resource values/bars, build status/file progress and the time estimate (four Build rows), at least one process row with table headings, and three log rows. Optional resource details and build captions appear only when their section has room. Narrow layouts can also reveal load, swap, and available/free space by expanding Resources. Heights are retained for the current session and clamped to fit smaller terminals. Resizing preserves log scroll/follow state and adjusts process scroll bounds to the new viewport.
+CPU, Memory, and Storage share one resource row and resize together. Only the application header and footer remain fixed. Minimum heights preserve resource values/bars, build status/Lake progress and the time estimate (four Build rows), at least one process row with table headings, and three log rows. Optional resource details and build captions appear only when their section has room. Narrow layouts can also reveal load, swap, and available/free space by expanding Resources. Heights are retained for the current session and clamped to fit smaller terminals. Resizing preserves log scroll/follow state and adjusts process scroll bounds to the new viewport.
 
 | Option | Meaning |
 | --- | --- |
@@ -182,17 +182,13 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
 - **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. By default the pane grows to show all entries that fit, reducing optional summary space if necessary while preserving the log minimum. Excess entries remain scrollable when terminal space runs out. Dragging a divider sets a manual height for the session. The heading shows the visible range and total. Processes are live and not filtered by project.
-- **ACTIVE/IDLE** reflects whether any of those processes were detected. **The main progress bar** uses distinct recognized Lean-module completions from the selected build log divided by the estimated file total. **Lake jobs** is a separate reference line preserving Lake's latest `[reported/total]` pair; it never drives the file bar.
+- **ACTIVE/IDLE** reflects whether any of those processes were detected. **Build** displays the latest recognized Lake `[reported/total]` pair directly as `reported / total`. For example, `[16000/20000]` displays `16000 / 20000`. No offset, source scan, artifact count, frozen denominator, or extra-file adjustment is applied.
 
-Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).
+Lake reports build jobs rather than one job per `.lean` file. Native facets, cache work, and other jobs can contribute to these counters. The monitor deliberately uses Lake's values for both sides; it does not reinterpret them as an independently verified file count. Lake can grow its total during dependency discovery. Before a recognized status record is available, Build shows `— / —`. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.36.0/src/lake/Lake/Build/Run.lean).
 
-**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. Before the first numeric display, the worker replays the entire selected log and unions its recognized completed modules with the stale-file candidates. This includes already completed files whose artifacts are fresh. The resulting initial set is frozen for the observed run. Later known compiler targets and completions outside that set are tracked internally for time estimation, without changing the file denominator. No extra-file counter is displayed. Recognized source-module `Built` events update completion counts. Time estimates start from the first recognized module duration as a rough estimate, then prefer live completion throughput when available. If no time can be calculated, the row states whether the build log or timing data is missing. No second Lake build or per-refresh source-tree scan is launched.
+**Estimated time:** total and remaining time use the observed increase in Lake's reported counter divided by elapsed monitoring time. At least two different counts and one second are needed to measure a speed. The monitor keeps at most 32 observations, updates forecasts when Lake's total changes, and resets the speed on a counter decrease or detected log rotation/truncation. The initial counter may already be 16,000; the speed calculation uses subsequent differences, rather than pretending those jobs completed after startup. Time remains approximate and does not recover the build's actual start time. Without enough progress updates, the time row explains that it is waiting.
 
-The file counter keeps the requested plain numeric format; its denominator remains an estimate. Time predictions use `≈`. They are not Lake's exact build plan: dynamic/custom target configuration, generated modules, cache layout, and hash-based dependency decisions can change actual work. The scan uses a local/import fallback rather than executing `lakefile.lean`. The displayed total time forecasts the analyzed historical and pending Lean work at the estimated speed; it does not recover the actual build start or elapsed wall time, and it excludes unrelated native/link jobs. See [Lake's module build decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
-
-The numerator is restored from the entire selected log at startup, including records before monitoring began, and continues from a byte watermark. Restarting against the same log does not reset it. Duplicate completions count once per module; native facets, replayed jobs, diagnostics, and unmatched targets do not count. Initial replay runs in the source worker with a 16 KiB read buffer and 4 KiB per-record limit; later catch-up reads at most 64 KiB per refresh without skipping bytes. The live 200-record display ring does not limit compilation counting. No checkpoint or duplicate log file is written.
-
-Use one log file per build. Appending different builds to the same log combines their distinct modules because the log has no reliable build-session identifier. Deleted or overwritten records cannot be reconstructed. Counts are limited to modules in the source/import inventory, so a partial graph can still undercount. Completed modules outside the initial set contribute to the numerator and time forecast. If observed completions exceed the initial estimate, the monitor preserves the completed count and displays `completed / —` instead of clipping it or inventing a total. Historical records seed timings but do not create artificial live throughput. Detected rotation/truncation clears the old run and replays the current file; same-inode truncate-and-regrow between samples can remain undetected.
+On restart, Build reads Lake's latest counter from the selected log's bounded tail; it does not start an independent completion count. A tail containing no recognized Lake progress shows unknown until a new progress record arrives. Use one explicitly selected log per build when multiple logs exist. Source files and `.olean` artifacts are never scanned for either the ratio or time forecast.
 
 Log progress can belong to an earlier run and does not supply a build exit code. A full progress bar does not establish a successful build or a valid theorem proof. This tool does not inspect Lean declarations, axioms, `sorry`, or proof artifacts.
 
@@ -212,7 +208,7 @@ cargo build --release --offline
 python3 tests/terminal_smoke.py target/release/lean-top
 ```
 
-Unit tests cover synthetic `/proc` sampling, argument/target handling, log retention and wrapped scrolling, CLI defaults, pane resizing, details, and estimator state transitions. The Python smoke test exercises the actual executable through a Unix PTY, including automatic/explicit log selection, process details, every divider, narrow-terminal wrapping, shutdown/restoration, and an estimated three-file Lean project with live completion updates and no artifact writes. Python 3 is only needed for this development check, not for running the monitor.
+Unit tests cover synthetic `/proc` sampling, argument/target handling, log retention and wrapped scrolling, CLI defaults, pane resizing, details, and estimator state transitions. The Python smoke test exercises the actual executable through a Unix PTY, including automatic/explicit log selection, process details, every divider, narrow-terminal wrapping, shutdown/restoration, and direct Lake counter updates, growing totals, and restarts without source files or artifact writes. Python 3 is only needed for this development check, not for running the monitor.
 
 GitHub Actions runs the checks on Ubuntu 24.04 and macOS, plus a Rust 1.70 compatibility check on Ubuntu. The Ubuntu checks also exercise live CPU, memory, and filesystem sampling. Test live sampling on your deployment server when its permissions or environment differ.
 

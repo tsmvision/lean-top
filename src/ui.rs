@@ -1039,8 +1039,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         w - 17,
     );
     let progress_y = b + 2;
-    if let Some(total) = state.estimate.files {
-        let completed = state.estimate.completed;
+    if let Some((completed, total)) = log.current_progress() {
         let label = format!("{completed} / {total}");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
@@ -1063,12 +1062,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             (w - 2).saturating_sub(x),
         );
     } else {
-        let label = if state.estimate.completed == 0 {
-            "— / —".into()
-        } else {
-            format!("{} / —", state.estimate.completed)
-        };
-        frame.text(2, progress_y, &label, Color::Muted, inside);
+        frame.text(2, progress_y, "— / —", Color::Muted, inside);
     }
     let lines = log.visible_lines();
     let latest = lines.iter().rev().find(|line| progress(line).is_some());
@@ -1083,14 +1077,9 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                 duration(left)
             ),
             (_, Some(left)) => format!("Est. time ≈ {} remaining", duration(left)),
-            _ if state.estimate.files.is_none()
-                && state.estimate.scope.to_lowercase().contains("scann") =>
-            {
-                "Est. time: waiting for source analysis…".into()
-            }
-            _ if state.estimate.files.is_none() => "Est. time: unavailable".into(),
             _ if log.path.is_none() && !state.demo => "Est. time: no build log (set --log)".into(),
-            _ => "Est. time: no timing data in build log".into(),
+            _ if log.current_progress().is_none() => "Est. time: waiting for Lake progress".into(),
+            _ => "Est. time: waiting for Lake progress updates".into(),
         };
         frame.text(2, progress_y + 1, &time, Color::Text, inside);
     }
@@ -1132,11 +1121,10 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             2,
             progress_y + 3,
             &format!(
-                "Lake jobs: {} · {}",
-                log.current_progress()
-                    .map(|(done, total)| format!("{done}/{total}"))
-                    .unwrap_or_else(|| "unknown".into()),
-                latest.map(|s| s.as_str()).unwrap_or("—")
+                "Latest: {}",
+                latest
+                    .and_then(|line| line.split_once(']').map(|(_, text)| text.trim()))
+                    .unwrap_or("—")
             ),
             Color::Muted,
             inside,
@@ -1453,11 +1441,8 @@ mod tests {
                     pane_heights: preference,
                     demo: true,
                     estimate: Estimate {
-                        files: Some(120),
-                        completed: 34,
                         total_seconds: Some(180.0),
                         remaining_seconds: Some(129.0),
-                        scope: "test".into(),
                     },
                     ..ViewState::default()
                 };
@@ -1507,7 +1492,7 @@ mod tests {
                     height
                 )
                 .plain()
-                .contains("Est. time: no timing data"));
+                .contains("Est. time: waiting for Lake progress"));
             }
         }
     }
@@ -1530,17 +1515,14 @@ mod tests {
     }
 
     #[test]
-    fn build_estimates_are_distinct_from_reported_lake_job_counts() {
+    fn build_ratio_uses_lake_counts_directly_including_growing_totals() {
         let snapshot = crate::monitor::demo(0);
         let mut log = LogTail::default();
         log.progress = Some((342, 680));
         let state = ViewState {
             estimate: Estimate {
-                files: Some(120),
-                completed: 34,
                 total_seconds: Some(180.0),
                 remaining_seconds: Some(129.0),
-                scope: "local estimate".into(),
             },
             ..ViewState::default()
         };
@@ -1559,12 +1541,13 @@ mod tests {
         )
         .plain();
         assert!(!text.contains("Initial Lean files"));
-        assert!(text.contains("34 / 120"));
+        assert!(text.contains("342 / 680"));
+        assert!(!text.contains("34 / 120"));
         assert!(!text.contains("120 files"));
         assert!(!text.contains("fixed"));
         assert!(!text.contains("extra"));
         assert!(!text.contains("additional"));
-        assert!(text.contains("Lake jobs: 342/680"));
+        assert!(!text.contains("Lake jobs:"));
         assert!(text.contains("3m 0s total · ≈ 2m 9s left"));
         let before = render(
             &View {
@@ -1593,10 +1576,11 @@ mod tests {
             110,
             38,
         );
-        assert_eq!(
-            before.cells[14 * 110..15 * 110],
-            after.cells[14 * 110..15 * 110],
-            "The main progress bar must not depend on Lake's job counts"
+        assert!(after.plain().contains("600 / 9000"));
+        assert_ne!(
+            before.cells[13 * 110..14 * 110],
+            after.cells[13 * 110..14 * 110],
+            "The main progress bar must follow Lake's reported counts"
         );
     }
 
