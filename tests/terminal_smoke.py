@@ -13,6 +13,37 @@ import sys
 import tempfile
 import termios
 import time
+import unicodedata
+
+
+def screen_text(data):
+    """Interpret cursor-addressed output so assertions also support partial writes."""
+    rows = [[" "] * 200 for _ in range(100)]
+    x = y = 0
+    for token in re.findall(r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+", data.decode("utf-8", "replace")):
+        if token.startswith("\x1b["):
+            args, command = token[2:-1], token[-1]
+            if command == "H":
+                values = [int(v or 1) for v in args.split(";")]
+                y, x = values[0] - 1, (values[1] if len(values) > 1 else 1) - 1
+            elif command == "J" and args == "2":
+                rows = [[" "] * 200 for _ in range(100)]
+            elif command == "K" and args == "2" and y < 100:
+                rows[y] = [" "] * 200
+            continue
+        for char in token:
+            if char == "\r":
+                x = 0
+            elif char == "\n":
+                y += 1
+            elif ord(char) >= 32 and not unicodedata.combining(char):
+                if y < 100 and x < 200:
+                    rows[y][x] = char
+                    width = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+                    if width == 2 and x + 1 < 200:
+                        rows[y][x + 1] = ""
+                    x += width
+    return "\n".join("".join(row) for row in rows)
 
 
 def exercise(binary, quit_key=None):
@@ -57,7 +88,7 @@ def exercise(binary, quit_key=None):
             chunk = read_chunk(0.1)
             if chunk:
                 output.extend(chunk)
-                if needle in output:
+                if needle in output or needle.decode("utf-8") in screen_text(captured):
                     return bytes(output)
         raise AssertionError(f"Did not see {needle!r}: {output[-2000:]!r}")
 
@@ -68,7 +99,7 @@ def exercise(binary, quit_key=None):
         return output + drain()
 
     def assert_panel_only(output, first_row, last_row):
-        rows = [int(row) for row in re.findall(rb"\x1b\[(\d+);1H", output)]
+        rows = [int(row) for row in re.findall(rb"\x1b\[(\d+);\d+H", output)]
         assert rows, f"Expected panel repaint, received {output!r}"
         assert all(first_row <= row <= last_row for row in rows), (
             f"Wheel repainted another panel: rows={rows}, expected {first_row}..{last_row}"
@@ -127,7 +158,7 @@ def exercise(binary, quit_key=None):
         event_output(b"\x1b[<0;10;12M")
         output = event_output(b"\x1b[<32;10;10M", b"BUILD")
         assert_panel_only(output,5,18)
-        assert b"\x1b[10;1H" in output
+        assert re.search(rb"\x1b\[10;\d+H", output)
         event_output(b"\x1b[<0;10;10m")
         event_output(b"\x1b[<0;10;10M")
         assert_panel_only(event_output(b"\x1b[<32;10;12M", b"BUILD"),5,18)
@@ -137,7 +168,7 @@ def exercise(binary, quit_key=None):
         event_output(b"\x1b[<0;10;19M")
         output = event_output(b"\x1b[<32;10;17M", b"1-5 / 6")
         assert_panel_only(output,12,24)
-        assert b"\x1b[17;1H" in output
+        assert re.search(rb"\x1b\[17;\d+H", output)
         event_output(b"\x1b[<0;10;17m")
         assert_panel_only(event_output(b"\x1b[<65;10;20M",b"2-6 / 6"),17,24)
         event_output(b"\x1b[<64;10;20M",b"1-5 / 6")
@@ -149,14 +180,14 @@ def exercise(binary, quit_key=None):
         event_output(b"\x1b[<0;10;25M")
         output = event_output(b"\x1b[<32;10;23M", b"1-1 / 6")
         assert_panel_only(output, 19, 36)
-        assert b"\x1b[23;1H" in output and b"BUILD LOG" in output
+        assert re.search(rb"\x1b\[23;\d+H", output) and "BUILD LOG" in screen_text(captured)
         event_output(b"\x1b[<0;10;23m")
         # No held left button means a stray motion must not change the height.
         assert event_output(b"\x1b[<32;10;29M") == b""
         event_output(b"\x1b[<0;10;23M")
         output = event_output(b"\x1b[<32;10;29M", b"1-6 / 6")
         assert_panel_only(output, 19, 36)
-        assert b"\x1b[29;1H" in output and b"BUILD LOG" in output
+        assert re.search(rb"\x1b\[29;\d+H", output) and "BUILD LOG" in screen_text(captured)
         event_output(b"\x1b[<0;10;29m")
         # Mouse routing follows the moved divider, not its original row25.
         output = event_output(b"\x1b[<64;10;32M")
@@ -179,7 +210,7 @@ def exercise(binary, quit_key=None):
         event_output(b"\x1b[<0;10;19M")
         output = event_output(b"\x1b[<32;10;17M",b"BUILD LOG")
         assert_panel_only(output,10,22)
-        assert b"\x1b[17;1H" in output
+        assert re.search(rb"\x1b\[17;\d+H", output)
         event_output(b"\x1b[<0;10;17m")
         if quit_key is None:
             process.send_signal(signal.SIGTERM)
@@ -243,6 +274,7 @@ def main():
         exercise(binary, key)
     exercise_wrapping(binary)
     exercise_estimates(binary)
+    exercise_log_stability(binary)
     if sys.platform.startswith("linux"):
         live = subprocess.check_output([binary, "--snapshot"])
         assert b"require Linux /proc" not in live
@@ -299,13 +331,17 @@ def exercise_estimates(binary):
         master,slave = os.openpty()
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
         process = subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
+        captured = bytearray()
         def expect_all(needles):
             data = bytearray()
             deadline = time.monotonic()+5
             while time.monotonic()<deadline:
                 if select.select([master],[],[],0.1)[0]:
-                    data.extend(os.read(master,65536))
-                    if all(needle in data for needle in needles):
+                    chunk = os.read(master,65536)
+                    data.extend(chunk)
+                    captured.extend(chunk)
+                    screen = screen_text(captured)
+                    if all(needle.decode("utf-8") in screen for needle in needles):
                         return bytes(data)
             raise AssertionError(f"Missing estimate evidence {needles!r}: {data[-1500:]!r}")
         try:
@@ -327,6 +363,43 @@ def exercise_estimates(binary):
             if process.poll() is None:
                 process.kill();process.wait()
             os.close(master);os.close(slave)
+
+
+def exercise_log_stability(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-log-stable-") as directory:
+        log = Path(directory) / "build.log"
+        log.write_text("✔ [1/4] Built A\n⣾ [2/4] Running B\r", encoding="utf-8")
+        master, slave = os.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 38, 111, 0, 0))
+        process = subprocess.Popen([binary, "--project", directory, "--log", str(log), "--interval-ms", "100"], stdin=slave, stdout=slave, stderr=slave)
+        def collect(seconds):
+            data = bytearray()
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    data.extend(os.read(master, 65536))
+            return bytes(data)
+        try:
+            initial = collect(1)
+            rows = screen_text(initial).splitlines()
+            header = next(i + 1 for i, row in enumerate(rows) if "BUILD LOG" in row)
+            for chunk in ["", "⣷ [2/4] Running B\r", "⣯ [2/4] Running B", "\r\n"]:
+                with log.open("a", encoding="utf-8") as output:
+                    output.write(chunk)
+                output = collect(0.4)
+                written = [int(row) for row in re.findall(rb"\x1b\[(\d+);\d+H", output)]
+                assert not any(header <= row <= 36 for row in written), (chunk, written, header)
+                assert b"\x1b[2J" not in output and b"\x1b[2K" not in output
+            with log.open("a", encoding="utf-8") as output:
+                output.write("ACTUAL_NEW_BUILD_EVENT\n")
+            output = collect(0.5)
+            assert b"ACTUAL_NEW_BUILD_EVENT" in output
+            assert b"\x1b[2J" not in output and b"\x1b[2K" not in output
+        finally:
+            os.write(master, b"q")
+            process.wait(timeout=3)
+            os.close(master)
+            os.close(slave)
 
 
 if __name__ == "__main__":

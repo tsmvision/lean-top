@@ -171,3 +171,9 @@ cargo build --release --offline
 ```
 
 For source changes, run `cargo fmt --check`, `cargo test --offline`, and `cargo clippy --offline --all-targets -- -D warnings` before rebuilding.
+
+## Build Log appears to refresh without new messages
+
+Recognized Lake progress lines normalize the spinner glyph and suppress consecutive identical progress records, including an identical unfinished line. CPU/memory updates alone do not write unchanged log rows. New text updates changed character spans without clearing the row. Distinct progress counters or messages still update the log; repeated ordinary diagnostics are retained.
+
+Scrolling, terminal resizing, overlays, and automatic pane movement when process counts change can redraw affected log content. These are viewport changes. If repeated updates remain at a fixed viewport, check whether the selected log contains genuinely changing counters or text rather than only spinner animation.

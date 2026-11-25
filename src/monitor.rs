@@ -407,6 +407,27 @@ pub struct LogTail {
 }
 
 impl LogTail {
+    fn display_line(text: &str) -> String {
+        let mut line = clean(text);
+        // Lake's spinner is animation, not a new build event.
+        if progress(&line).is_some() {
+            let trimmed = line.trim_start();
+            if let Some(icon) = trimmed.chars().next() {
+                if ('\u{2800}'..='\u{28ff}').contains(&icon) {
+                    line = format!("⣾{}", &trimmed[icon.len_utf8()..]);
+                }
+            }
+        }
+        line
+    }
+
+    fn pending_line(&self) -> Option<String> {
+        let line = Self::display_line(&String::from_utf8_lossy(&self.pending));
+        (!line.trim().is_empty()
+            && !(progress(&line).is_some() && self.lines.back() == Some(&line)))
+        .then_some(line)
+    }
+
     pub fn new(path: Option<PathBuf>) -> Self {
         Self {
             path,
@@ -477,7 +498,7 @@ impl LogTail {
         };
         for byte in bytes.into_iter().skip(start) {
             if byte == b'\n' || byte == b'\r' {
-                let line = clean(&String::from_utf8_lossy(&self.pending));
+                let line = Self::display_line(&String::from_utf8_lossy(&self.pending));
                 if let Some(value) = progress(&line) {
                     self.progress = Some(value);
                 }
@@ -493,6 +514,10 @@ impl LogTail {
     }
 
     pub fn push(&mut self, line: String) {
+        let line = Self::display_line(&line);
+        if progress(&line).is_some() && self.lines.back() == Some(&line) {
+            return;
+        }
         if self.lines.len() >= 200 {
             self.lines.pop_front();
         }
@@ -502,7 +527,7 @@ impl LogTail {
 
     pub fn cursor(&self) -> u64 {
         self.lines_added
-            .saturating_add(u64::from(!self.pending.is_empty()))
+            .saturating_add(u64::from(self.pending_line().is_some()))
     }
 
     pub fn current_progress(&self) -> Option<(u64, u64)> {
@@ -512,8 +537,8 @@ impl LogTail {
 
     pub fn visible_lines(&self) -> Vec<String> {
         let mut lines: Vec<_> = self.lines.iter().cloned().collect();
-        if !self.pending.is_empty() {
-            lines.push(clean(&String::from_utf8_lossy(&self.pending)));
+        if let Some(line) = self.pending_line() {
+            lines.push(line);
         }
         lines
     }

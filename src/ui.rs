@@ -431,12 +431,26 @@ impl Frame {
         }
         for y in 0..self.height {
             let range = y * self.width..(y + 1) * self.width;
-            if same_size && previous.unwrap().cells[range.clone()] == self.cells[range.clone()] {
-                continue;
+            let row = &self.cells[range.clone()];
+            let (mut start, mut end) = (0, self.width);
+            if same_size {
+                let old = &previous.unwrap().cells[range];
+                let Some(first) = row.iter().zip(old).position(|(a, b)| a != b) else {
+                    continue;
+                };
+                start = first;
+                end = row.iter().zip(old).rposition(|(a, b)| a != b).unwrap() + 1;
+                // Rewrite both columns when either frame contains a wide glyph.
+                while start > 0 && (row[start].continuation || old[start].continuation) {
+                    start -= 1;
+                }
+                while end < self.width && (row[end].continuation || old[end].continuation) {
+                    end += 1;
+                }
             }
-            let _ = write!(output, "\x1b[{};1H\x1b[0m\x1b[2K", y + 1);
+            let _ = write!(output, "\x1b[{};{}H\x1b[0m", y + 1, start + 1);
             let mut last = None;
-            for cell in &self.cells[range] {
+            for cell in &row[start..end] {
                 if cell.continuation {
                     continue;
                 }
@@ -1976,6 +1990,42 @@ mod tests {
                 .lines()
                 .all(|l| l.chars().map(char_width).sum::<usize>() == w));
         }
+    }
+
+    #[test]
+    fn diff_changes_only_the_modified_span_without_clearing_rows() {
+        let mut before = Frame::new(40, 3);
+        before.text(
+            2,
+            1,
+            "unchanged prefix: 100 unchanged suffix",
+            Color::Text,
+            38,
+        );
+        let mut after = Frame::new(40, 3);
+        after.text(
+            2,
+            1,
+            "unchanged prefix: 101 unchanged suffix",
+            Color::Text,
+            38,
+        );
+        assert_eq!(
+            after.ansi_diff(Some(&before), false),
+            "\x1b[2;23H\x1b[0m1\x1b[0m"
+        );
+        let mut wide = Frame::new(40, 3);
+        wide.text(2, 1, "가", Color::Text, 38);
+        let mut narrow = Frame::new(40, 3);
+        narrow.text(2, 1, "a", Color::Text, 38);
+        assert_eq!(
+            narrow.ansi_diff(Some(&wide), false),
+            "\x1b[2;3H\x1b[0ma \x1b[0m"
+        );
+        assert_eq!(
+            wide.ansi_diff(Some(&narrow), false),
+            "\x1b[2;3H\x1b[0m가\x1b[0m"
+        );
     }
 
     #[test]

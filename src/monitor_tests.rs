@@ -5,6 +5,35 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn repeated_spinner_frames_do_not_append_or_move_the_log_viewport() {
+    let fixture = Fixture::new();
+    let path = fixture.write("build.log", "✔ [1/4] Built A\n⣾ [2/4] Running B\r");
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    let before = log.visible_lines();
+    let cursor = log.cursor();
+    for chunk in ["⣷ [2/4] Running B\r", "⣯ [2/4] Running B", "\r\n"] {
+        fixture.append("build.log", chunk.as_bytes());
+        log.refresh();
+        assert_eq!(log.visible_lines(), before);
+        assert_eq!(log.cursor(), cursor);
+    }
+    fixture.append("build.log", "⣷ [3/4] Running C\r".as_bytes());
+    log.refresh();
+    assert_eq!(log.cursor(), cursor + 1);
+    assert_eq!(log.visible_lines().last().unwrap(), "⣾ [3/4] Running C");
+    fixture.append("build.log", b"warning: repeated\nwarning: repeated\n");
+    log.refresh();
+    assert_eq!(
+        log.lines
+            .iter()
+            .filter(|s| *s == "warning: repeated")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn exactly_64_kib_append_keeps_first_complete_line() {
     let fixture = Fixture::new();
     let path = fixture.write("build.log", "initial\n");
