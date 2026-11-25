@@ -13,6 +13,26 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --snapshot
 
 `--snapshot` writes one plain-text 110 × 38 frame and exits. `--no-color` only disables colors; it does not turn interactive output into plain text.
 
+## An update does not appear in the running command
+
+Stop the old monitor with `q`, update your checkout, and rebuild:
+
+```sh
+git pull --ff-only
+cargo build --release --offline
+./target/release/lean-top --demo
+```
+
+If `lean-top` was installed with Cargo, run `cargo install --path . --force --offline` from the updated checkout. A release build updates `target/release/lean-top`, not an older installed executable. Restart the monitor after rebuilding or reinstalling.
+
+## The default project or log is not the one expected
+
+Without `--project`, the project is your launch directory (`.`), used for estimates, storage, and the header. It does not restrict the server-wide process list. Without `--log`, the log is selected independently from `~/logs`, using filename order rather than freshness. For an unambiguous pairing, pass both absolute paths:
+
+```sh
+lean-top --project /srv/riemann --log /srv/riemann/build.log
+```
+
 ## The screen asks to be resized
 
 Use at least 53 terminal columns × 20 rows for the compact layout, or 91 columns × 32 rows for the full layout. The application reserves one column to avoid wrapping at the right edge. Compact mode hides the process table and initially shows only the core resource rows; expand Resources to reveal available details. CPU history is no longer displayed in either layout.
@@ -81,11 +101,19 @@ Process discovery is server-wide. Any visible process named `lean`, `lake`, or `
 
 The normal table intentionally shows only `TYPE`, `MEMORY`, and `TARGET`. Click a process row, or press `p`/`Enter` for the first visible row, to open details. Scroll long details with the wheel or arrow keys. Press `Enter`/`Esc` or click outside to close. A process that disappears retains its last captured details with a no-longer-visible label. If target detection or working-directory access fails, its path may be unavailable or relative; full command display remains available when readable.
 
+While details are open, arrows and `j`/`k` scroll the dialog instead of logs, and wheel events do not operate the background panels. `Esc` closes help first if it is layered over details. Close details before resizing sections. `q` still exits the monitor rather than just closing the dialog.
+
 ## Compile estimates are unavailable, learning, or different from Lake jobs
 
 Estimated Lean files are separate from the Lake job counter. The background source/import scan needs a readable Lean project under `--project`; a folder containing no local Lean sources has no file estimate. Time remains `Learning` until recognized source-module completion timings or throughput provide enough samples. Replayed and native jobs do not train Lean compilation time.
 
+`Scanning` means the background analysis has not returned yet; `Unavailable` means it could not supply a useful source estimate. Cold timing data remains `Learning`; the monitor does not substitute a fixed seconds-per-file constant. An apparently surprising zero can mean standard artifacts look current; observed compilation can subsequently expand the estimate. The `done` count excludes old log history used only for calibration, so it need not equal every module that completed before monitoring began.
+
 Estimates are approximate: custom build directories, generated sources, dynamic target configuration, and Lake's hash/artifact cache can differ from a source/standard-output timestamp estimate. The scope label indicates low confidence or a partial scan. Joining a build midway or reading a bounded tail cannot recover its true start time and all earlier work. Use a fresh, explicitly selected log for each run and the correct project directory; no second build is launched for estimation.
+
+## Some processes or estimate fields are not visible
+
+Automatic process height attempts to show the complete matching list, but it cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the automatic viewport. Restart to restore the default allocation. Expanding Build reveals optional estimates, log-source information, and latest-event text hidden by a short section. The process table remains unavailable in compact mode.
 
 ## Mouse scrolling does not work
 
@@ -98,6 +126,8 @@ Mouse scrolling requires a terminal or terminal multiplexer that forwards XTerm-
 Start dragging on a horizontal divider labeled `BUILD`, `PROCESSES`, or `BUILD LOG`, using the left mouse button. The divider resizes the adjacent sections; dragging inside their content does not resize them. CPU, Memory, and Storage share the Resources section, adjusted using the `BUILD` divider below them. Close help first, and ensure your terminal forwards button-motion reports.
 
 Dividers stop when either adjacent pane reaches its minimum height. The title/header and footer remain fixed, and Processes is hidden in compact mode. Expand the terminal if there is not enough room to grow a section further. Shrinking a section hides optional details while retaining its core values or progress. Release the button before scrolling. Height preferences last for the current session only.
+
+Close process details as well as help before dragging. A drag is canceled if a terminal resize switches between full and compact layouts; start a new drag on the visible divider afterward.
 
 ## Storage does not match the project directory's size
 

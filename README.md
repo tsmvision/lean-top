@@ -1,6 +1,6 @@
 # lean-top
 
-A lightweight terminal dashboard for Lean builds on 64-bit Ubuntu Linux. It shows server CPU, memory, swap, project-filesystem storage, Lean/Lake processes, Lake progress, and a live build-log tail.
+A lightweight terminal dashboard for Lean builds on 64-bit Ubuntu Linux. It shows server resources, inspectable Lean/Lake processes, Lake job progress, approximate Lean compilation counts and times, and wrapping build logs. Mouse wheels navigate individual panels, and dragging section dividers adjusts their heights.
 
 Written in Rust with **no Cargo dependencies**. The default refresh interval is **500 ms**. The monitor reads system information and an existing log; it does not launch, stop, or modify your build.
 
@@ -30,6 +30,24 @@ cargo install --path . --offline
 lean-top --demo
 ```
 
+## Update an existing installation
+
+From your `lean-top` checkout:
+
+```sh
+git pull --ff-only
+cargo build --release --offline
+./target/release/lean-top --demo
+```
+
+If you run the Cargo-installed `lean-top` command, also replace that executable:
+
+```sh
+cargo install --path . --force --offline
+```
+
+Building `target/release/lean-top` alone does not update a previously installed copy. Run the rebuilt executable or reinstall before checking new behavior. If you copied the binary elsewhere, replace that copy too; `command -v lean-top` identifies the executable selected by your shell.
+
 ## Monitor a Lean project
 
 Start the build in one terminal. Use Bash so that `pipefail` preserves a failing build's exit status through `tee`:
@@ -48,9 +66,20 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log
 
 `tee build.log` truncates the file at the start of a run. Prefer a unique log filename for each run when retaining logs or switching between builds. Pass that same filename to `--log`.
 
-`--project` selects the filesystem for storage capacity and the directory shown in the header. A relative `--log` path is resolved against the monitor's working directory, independently of `--project`. The log file may be created after the monitor starts; missing files are retried.
+`--project` defaults to the current directory (`.`), selects the source/import scope for estimates, selects the filesystem for storage capacity, and supplies the directory shown in the header. It does not filter the server-wide resource metrics or process list. A relative `--log` path is resolved against the monitor's working directory, independently of `--project`. An explicitly selected log may be created after the monitor starts; missing files are retried.
 
 When `--log` is omitted, startup selects the first regular, non-hidden `*.log` file in `~/logs`, ordered by filename. This is a nonrecursive lookup and does not mean the newest file. An explicit `--log` overrides discovery. If no matching file or home directory is available, system monitoring still starts without a log. Demo mode never selects a real log automatically.
+
+Examples using the defaults:
+
+```sh
+cd /srv/riemann
+lean-top --log ./build.log
+# Use this project and the first filename-sorted ~/logs/*.log:
+lean-top
+```
+
+Automatic discovery runs once at startup. It does not switch to a different file when another log appears. For a build that has not created its log yet, select its future path explicitly.
 
 ## Screen
 
@@ -70,7 +99,8 @@ BUILD
 ● ACTIVE    6 Lean/Lake processes · server-wide
 Est. Lean files ≈ 120 · done 34 · demo estimate
 ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680 jobs
-Est. time ≈ 3m total · ≈ 2m 9s left
+Est. time ≈ 3m 0s total · ≈ 2m 9s left
+Log: simulated build.log · last read 12:34:56 UTC
 Latest event   ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
 PROCESSES · 1-6 / 6
@@ -87,10 +117,10 @@ BUILD LOG
 warning: ExplicitFormula.lean:128: unused variable `h`
 ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
-q Quit   Space Pause   ↑↓/jk Scroll   f Follow   ? Help
+q Quit  Space Pause  Wheel Scroll  Click/p Details  ↑↓ Logs  f Follow  ? Help
 ```
 
-The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. The compact layout omits the process table and resource detail rows.
+The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. Compact mode hides the process table and initially shows core resource values; expanding Resources reveals additional details. Resizing a section smaller can hide optional build/estimate fields without affecting their background calculation.
 
 Unchanged log rows stay on screen while resource metrics continue to refresh. The log's last-read time is a fixed UTC timestamp that changes only when new bytes are read, rather than a continuously advancing age counter. Scrolling, help, and terminal resizing can still redraw the affected area.
 
@@ -105,17 +135,20 @@ Log text wraps to the panel width, including when the terminal narrows. Scroll t
 | Left-drag a section divider | Resize the sections immediately above and below it |
 | Click a process row | Open PID, memory, full target path, and command details |
 | `p` or `Enter` | Open details for the first visible process, or close an open details panel |
-| `Esc` or click outside details | Close the process details panel |
-| `q` or `Ctrl-C` | Quit the monitor; the separate build continues |
+| `Esc` | Close help first, or close process details |
+| Click outside details | Close details without operating the background panel |
+| `q` or `Ctrl-C` | Quit the monitor, including from details; the separate build continues |
 | `Space` | Pause/resume metric sampling and log reading |
-| `↑` / `k` | Scroll toward older retained log lines |
-| `↓` / `j` | Scroll toward newer retained log lines |
-| `f` | Resume following the latest output |
+| `↑` / `k` | Scroll older log display rows, or scroll up in open process details |
+| `↓` / `j` | Scroll newer log display rows, or scroll down in open process details |
+| `f` | Resume following the latest log output when details/help are closed |
 | `?` | Toggle keyboard help |
 
 Hover over the panel you want to scroll; clicking to focus is unnecessary. The two panels keep independent positions. Process scrolling leaves log following unchanged. Log scrolling disables automatic following; press `f` to return to the live tail. Mouse scrolling also works while sampling is paused and is ignored while help is open. It requires a terminal that forwards XTerm-compatible mouse reports. The log's existing keyboard controls remain available.
 
 The process table shows only type, memory, and a short target name. Open details to read full paths and command arguments, using the wheel or arrow keys to scroll long values. Details track the selected PID across sorting changes and label the last captured data if that process is no longer visible. Metrics continue updating behind the panel. Compiler targets are detected from kernel-provided arguments; relative paths are resolved against the process working directory when permissions allow. Lake rows show their command label, such as `build`, rather than a fabricated source filename.
+
+Opening details never suspends the build or changes either background panel's scroll position. While details are open, wheel events over that dialog scroll its contents and leave the background alone. Close details before dragging dividers. `p`/`Enter` can open the first visible process only when the process table is available and nonempty.
 
 Hold the left mouse button on a section divider and drag up or down. Each divider redistributes space between the two adjacent sections:
 
@@ -129,7 +162,7 @@ CPU, Memory, and Storage share one resource row and resize together. Only the ap
 
 | Option | Meaning |
 | --- | --- |
-| `--project PATH` | Existing project directory; defaults to the current directory |
+| `--project PATH` | Existing project directory for estimates/storage/header; defaults to `.` |
 | `--log PATH` | Existing or future build-log file; default is the first filename-sorted `~/logs/*.log` |
 | `--interval-ms MS` | Refresh interval from 100 to 60000 ms; default 500 |
 | `--demo` | Simulated resources, processes, and build output; cannot be combined with `--log` |
@@ -154,9 +187,11 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 
 Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).
 
-**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen for the observed run and can expand if real compilations contradict it. Recognized source-module `Built` events update completion counts. Time estimates learn from observed completion throughput and reported module timings; cold starts show `Learning` until samples exist. No second Lake build or recurring source-tree scan is launched.
+**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen for the observed run and can expand if real compilations contradict it. Recognized source-module `Built` events update completion counts. Time estimates learn from observed completion throughput and reported module timings; cold starts show `Learning` until samples exist. No second Lake build or per-refresh source-tree scan is launched.
 
 All predictions use `≈` and a confidence/scope label. They are not Lake's exact build plan: dynamic/custom target configuration, generated modules, cache layout, and hash-based dependency decisions can change actual work. The scan uses a local/import fallback rather than executing `lakefile.lean`. The displayed total time estimates the analyzed Lean compilation work from the monitor's observation window, not a recovered start time for a build you joined midway, and it excludes unrelated native/link jobs. See [Lake's module build decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
+
+The `done` value counts distinct recognized source-module completions observed after the monitor's baseline. Initial log history can seed timing estimates, but is not counted as new work completed during this session. Source analysis, `Scanning`, `Unavailable`, and timing `Learning` are different states; a missing estimate is never replaced with the Lake job denominator. Detected log rotation/truncation starts a new analysis, while same-inode truncate-and-regrow between samples can remain undetected.
 
 Log progress can belong to an earlier run and does not supply a build exit code. A full progress bar does not establish a successful build or a valid theorem proof. This tool does not inspect Lean declarations, axioms, `sorry`, or proof artifacts.
 
@@ -176,7 +211,7 @@ cargo build --release --offline
 python3 tests/terminal_smoke.py target/release/lean-top
 ```
 
-Unit tests use synthetic `/proc` data and temporary logs to cover sampling, progress, log rotation and bounds, CLI validation, and rendering. The Python smoke test exercises the actual executable through a Unix PTY, including keyboard controls, resizing, shutdown, and terminal restoration. Python 3 is only needed for this development check, not for running the monitor.
+Unit tests cover synthetic `/proc` sampling, argument/target handling, log retention and wrapped scrolling, CLI defaults, pane resizing, details, and estimator state transitions. The Python smoke test exercises the actual executable through a Unix PTY, including automatic/explicit log selection, process details, every divider, narrow-terminal wrapping, shutdown/restoration, and an estimated three-file Lean project with live completion updates and no artifact writes. Python 3 is only needed for this development check, not for running the monitor.
 
 GitHub Actions runs the checks on Ubuntu 24.04 and macOS, plus a Rust 1.70 compatibility check on Ubuntu. The Ubuntu checks also exercise live CPU, memory, and filesystem sampling. Test live sampling on your deployment server when its permissions or environment differ.
 
