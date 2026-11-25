@@ -275,12 +275,13 @@ def main():
     exercise_wrapping(binary)
     exercise_estimates(binary)
     exercise_log_stability(binary)
+    exercise_log_history(binary)
     if sys.platform.startswith("linux"):
         live = subprocess.check_output([binary, "--snapshot"])
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
 
 
 def exercise_wrapping(binary):
@@ -400,6 +401,49 @@ def exercise_log_stability(binary):
         finally:
             os.write(master, b"q")
             process.wait(timeout=3)
+            os.close(master)
+            os.close(slave)
+
+
+def exercise_log_history(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-scrollback-") as directory:
+        log = Path(directory) / "build.log"
+        log.write_text("".join(f"history record {i:05}\n" for i in range(3000)))
+        master, slave = os.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 38, 111, 0, 0))
+        process = subprocess.Popen([binary, "--project", directory, "--log", str(log), "--interval-ms", "100"], stdin=slave, stdout=slave, stderr=slave)
+        captured = bytearray()
+        def collect(seconds):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.03)[0]:
+                    captured.extend(os.read(master, 65536))
+            return screen_text(captured).splitlines()
+        try:
+            rows = collect(1)
+            header = next(i for i, row in enumerate(rows) if "BUILD LOG" in row)
+            assert any("history record 02999" in row for row in rows[header:36])
+            os.write(master, f"\x1b[<64;10;{header + 3}M".encode() * 80)
+            rows = collect(1)
+            records = [int(value) for value in re.findall(r"history record (\d+)", "\n".join(rows[header:36]))]
+            assert records and min(records) < 2800, records
+            before = rows[header:36]
+            with log.open("a") as output:
+                output.write("NEW_WHILE_READING_HISTORY\n")
+            rows = collect(0.5)
+            assert rows[header:36] == before, "New output moved the historical viewport"
+            os.write(master, b"f")
+            rows = collect(0.5)
+            assert any("NEW_WHILE_READING_HISTORY" in row for row in rows[header:36])
+        finally:
+            os.write(master, b"q")
+            deadline = time.monotonic() + 3
+            while process.poll() is None and time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    os.read(master, 65536)
+            if process.poll() is None:
+                process.kill()
+                process.wait()
             os.close(master)
             os.close(slave)
 

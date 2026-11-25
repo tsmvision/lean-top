@@ -5,6 +5,99 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn history_navigation_advances_through_a_record_larger_than_a_page() {
+    let fixture = Fixture::new();
+    let path = fixture.write("huge.log", vec![b'x'; 200_000]);
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    let mut page = log.history_before(Some(65536)).unwrap();
+    for _ in 0..4 {
+        if page.end == log.position {
+            break;
+        }
+        let previous = page.end;
+        page.extend(log.history_after(page.forward_start()).unwrap(), false);
+        assert!(page.end > previous);
+    }
+    assert_eq!(page.end, log.position);
+}
+
+#[test]
+fn history_replaces_a_partial_record_when_reading_forward() {
+    let fixture = Fixture::new();
+    let path = fixture.write("build.log", "old\nunfinished");
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    let mut page = log.history_before(None).unwrap();
+    fixture.append("build.log", b" line\nnext\n");
+    log.refresh();
+    let next = log.history_after(page.forward_start()).unwrap();
+    page.extend(next, false);
+    assert_eq!(page.lines(), ["old", "unfinished line", "next"]);
+}
+
+#[test]
+fn file_history_can_walk_beyond_the_live_ring_in_both_directions() {
+    let fixture = Fixture::new();
+    let text = (0..20_000)
+        .map(|i| format!("record {i:05} : retained build output\n"))
+        .collect::<String>();
+    let path = fixture.write("history.log", text);
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    assert_eq!(log.lines.len(), 200);
+    let mut page = log.history_before(None).unwrap();
+    assert_eq!(
+        page.lines().last().unwrap(),
+        "record 19999 : retained build output"
+    );
+    while page.start > 0 {
+        let previous = page.start;
+        let older = log.history_before(Some(page.start)).unwrap();
+        page.extend(older, true);
+        assert!(page.start < previous);
+        assert!(page.records.len() <= 4096);
+        assert!(page.records.iter().map(|r| r.0.len()).sum::<usize>() <= 262144);
+        let values: Vec<_> = page
+            .lines()
+            .iter()
+            .map(|s| s[7..12].parse::<usize>().unwrap())
+            .collect();
+        assert!(values.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    }
+    assert_eq!(
+        page.lines().first().unwrap(),
+        "record 00000 : retained build output"
+    );
+    while page.end < log.position {
+        let previous = page.end;
+        let newer = log.history_after(page.end).unwrap();
+        page.extend(newer, false);
+        assert!(page.end > previous);
+        assert!(page.records.len() <= 4096);
+        let values: Vec<_> = page
+            .lines()
+            .iter()
+            .map(|s| s[7..12].parse::<usize>().unwrap())
+            .collect();
+        assert!(values.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    }
+    assert_eq!(
+        page.lines().last().unwrap(),
+        "record 19999 : retained build output"
+    );
+    let frozen = page.lines();
+    fixture.append("history.log", b"new output\n");
+    log.refresh();
+    assert_eq!(page.lines(), frozen);
+    page.extend(log.history_after(page.end).unwrap(), false);
+    assert_eq!(page.lines().last().unwrap(), "new output");
+    fs::rename(fixture.0.join("history.log"), fixture.0.join("old.log")).unwrap();
+    fixture.write("history.log", "replacement\n");
+    assert!(log.history_before(None).is_err());
+}
+
+#[test]
 fn repeated_spinner_frames_do_not_append_or_move_the_log_viewport() {
     let fixture = Fixture::new();
     let path = fixture.write("build.log", "✔ [1/4] Built A\n⣾ [2/4] Running B\r");

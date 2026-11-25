@@ -1,6 +1,6 @@
 use crate::estimate::Estimate;
 use crate::input::MouseKind;
-use crate::monitor::{clean, progress, LogTail, Process, Snapshot};
+use crate::monitor::{clean, progress, LogHistory, LogTail, Process, Snapshot};
 use std::fmt::Write;
 use std::ops::Range;
 use std::path::Path;
@@ -516,6 +516,8 @@ pub struct ViewState {
     pub paused: bool,
     pub follow: bool,
     pub offset: usize,
+    pub log_history: Option<LogHistory>,
+    pub history_error: Option<String>,
     pub process_offset: usize,
     pub pane_heights: Option<[usize; 3]>,
     pub dragging_divider: Option<(usize, bool)>,
@@ -528,6 +530,23 @@ pub struct ViewState {
 }
 
 impl ViewState {
+    pub fn follow_log(&mut self) {
+        self.log_history = None;
+        self.history_error = None;
+        self.follow = true;
+        self.offset = 0;
+    }
+
+    pub fn sync_log_history(&mut self, log: &LogTail) {
+        if self
+            .log_history
+            .as_ref()
+            .is_some_and(|page| page.generation != log.generation)
+        {
+            self.follow_log();
+        }
+    }
+
     pub fn close_detail(&mut self) {
         self.process_detail = None;
         self.detail_offset = 0;
@@ -581,9 +600,81 @@ impl ViewState {
         previous != self.detail_offset
     }
 
-    pub fn scroll(&mut self, up: bool, count: usize, log: &LogTail, width: usize) {
+    pub fn scroll(
+        &mut self,
+        up: bool,
+        count: usize,
+        log: &LogTail,
+        size: (usize, usize),
+        snapshot: &Snapshot,
+    ) {
+        let (width, height) = size;
+        let warning_rows = snapshot.warnings.len()
+            + usize::from(log.error.is_some())
+            + usize::from(self.history_error.is_some());
+        let viewport = Layout::new(width, height, self.pane_heights, snapshot.processes.len())
+            .log
+            .map(|pane| pane.len().saturating_sub(1 + warning_rows))
+            .unwrap_or(1)
+            .max(1);
+        if !up && self.follow && self.offset == 0 {
+            return;
+        }
         self.follow = false;
-        let max = log_row_count(&log.visible_lines(), width).saturating_sub(1);
+        if up && self.log_history.is_none() && log.path.is_some() {
+            match log.history_before(None) {
+                Ok(page) => self.log_history = Some(page),
+                Err(error) => self.history_error = Some(error.to_string()),
+            }
+        }
+        if let Some(history) = &mut self.log_history {
+            let rows = log_row_count(&history.lines(), width);
+            let page = if up
+                && self.offset.saturating_add(count) > rows.saturating_sub(viewport)
+                && history.start > 0
+            {
+                Some(log.history_before(Some(history.start)))
+            } else if !up && count > self.offset {
+                if history.end >= log.position() {
+                    self.follow_log();
+                    return;
+                }
+                Some(log.history_after(history.forward_start()))
+            } else {
+                None
+            };
+            if let Some(page) = page {
+                match page {
+                    Ok(page) => {
+                        if !up && page.start == page.end {
+                            self.follow_log();
+                            return;
+                        }
+                        let added = log_row_count(&page.lines(), width);
+                        let removed = history.extend(page, up);
+                        if up {
+                            self.offset =
+                                self.offset.saturating_sub(log_row_count(&removed, width));
+                        } else {
+                            self.offset = self
+                                .offset
+                                .saturating_add(added)
+                                .saturating_sub(log_row_count(&removed, width));
+                        }
+                        self.history_error = None;
+                    }
+                    Err(error) => self.history_error = Some(error.to_string()),
+                }
+            }
+            let max = log_row_count(&history.lines(), width).saturating_sub(viewport);
+            self.offset = if up {
+                self.offset.saturating_add(count).min(max)
+            } else {
+                self.offset.saturating_sub(count)
+            };
+            return;
+        }
+        let max = log_row_count(&log.visible_lines(), width).saturating_sub(viewport);
         self.offset = if up {
             self.offset.saturating_add(count).min(max)
         } else {
@@ -725,9 +816,20 @@ impl ViewState {
             .as_ref()
             .is_some_and(|range| range.contains(&row))
         {
-            let previous = (self.follow, self.offset);
-            self.scroll(up, 3, log, width);
-            previous != (self.follow, self.offset)
+            let previous = (
+                self.follow,
+                self.offset,
+                self.log_history.as_ref().map(|page| (page.start, page.end)),
+                self.history_error.clone(),
+            );
+            self.scroll(up, 3, log, size, snapshot);
+            previous
+                != (
+                    self.follow,
+                    self.offset,
+                    self.log_history.as_ref().map(|page| (page.start, page.end)),
+                    self.history_error.clone(),
+                )
         } else {
             false
         }
@@ -1108,8 +1210,16 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         }
     }
     frame.rule(log_y, "BUILD LOG");
+    let lines = state
+        .log_history
+        .as_ref()
+        .map(LogHistory::lines)
+        .unwrap_or(lines);
     let available = (h - 2).saturating_sub(log_y + 1);
     let mut messages = Vec::new();
+    if let Some(error) = &state.history_error {
+        messages.push(format!("History unavailable: {error}"));
+    }
     if let Some(error) = &log.error {
         messages.push(format!("Log unavailable: {error} (retrying)"));
     }
@@ -1136,7 +1246,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     } else {
         wrapped
             .len()
-            .saturating_sub(state.offset.min(wrapped.len().saturating_sub(1)))
+            .saturating_sub(state.offset.min(wrapped.len().saturating_sub(log_rows)))
     };
     let start = end.saturating_sub(log_rows);
     for (index, (line, color)) in wrapped[start..end].iter().enumerate() {
@@ -1274,6 +1384,88 @@ fn render_detail(frame: &mut Frame, selected: &Process, snapshot: &Snapshot, off
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_reaches_file_history_and_stays_put_during_new_output() {
+        let path = std::env::temp_dir().join(format!(
+            "lean-top-history-ui-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            (0..20_000)
+                .map(|i| format!("history record {i:05}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut log = LogTail::new(Some(path.clone()));
+        log.refresh();
+        let mut state = ViewState {
+            follow: true,
+            ..ViewState::default()
+        };
+        let snapshot = crate::monitor::demo(0);
+        for _ in 0..30 {
+            state.scroll(true, 4096, &log, (110, 38), &snapshot);
+        }
+        assert_eq!(
+            state.log_history.as_ref().unwrap().lines()[0],
+            "history record 00000"
+        );
+        let render_state = |state: &ViewState, log: &LogTail| {
+            render(
+                &View {
+                    state,
+                    log,
+                    snapshot: &snapshot,
+                    project: "/project",
+                    host: "test",
+                    cores: 4,
+                    interval_ms: 500,
+                },
+                110,
+                38,
+            )
+        };
+        let before = render_state(&state, &log);
+        assert!(before.plain().contains("history record 00000"));
+        assert!(before.plain().contains("history record 00001"));
+        assert!(before.plain().contains("history record 00002"));
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"new arrival\n")
+            .unwrap();
+        log.refresh();
+        state.sync_log_history(&log);
+        let after = render_state(&state, &log);
+        let region = Layout::new(110, 38, None, snapshot.processes.len())
+            .log
+            .unwrap();
+        assert_eq!(
+            before.cells[region.start * 110..region.end * 110],
+            after.cells[region.start * 110..region.end * 110]
+        );
+        for _ in 0..30 {
+            state.scroll(false, 4096, &log, (110, 38), &snapshot);
+        }
+        assert!(state.follow);
+        assert!(state.log_history.is_none());
+        assert!(render_state(&state, &log).plain().contains("new arrival"));
+        state.scroll(true, 3, &log, (110, 38), &snapshot);
+        std::fs::write(&path, "replacement\n").unwrap();
+        log.refresh();
+        state.sync_log_history(&log);
+        assert!(state.follow);
+        assert!(state.log_history.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn build_time_stays_visible_at_minimum_height_and_with_many_processes() {
@@ -1545,7 +1737,7 @@ mod tests {
             .plain()
         };
         assert!(view(&state).contains("끝END"));
-        state.scroll(true, usize::MAX, &log, 52);
+        state.scroll(true, usize::MAX, &log, (52, 24), &snapshot);
         assert!(state.offset > 0);
         assert!(view(&state).contains("BEGIN"));
     }
@@ -1887,7 +2079,12 @@ mod tests {
         }
         // The compact layout routes the same physical row to its visible log,
         // never to the hidden process panel.
-        assert!(state.wheel(false, 9, 21, (79, 24), &snapshot, &log));
+        assert!(!state.wheel(false, 9, 21, (79, 24), &snapshot, &log));
+        assert!(
+            state.follow,
+            "Scrolling down at the live end keeps following"
+        );
+        assert!(state.wheel(true, 9, 21, (79, 24), &snapshot, &log));
         assert_eq!(state.process_offset, 0);
         assert!(!state.follow);
         state.follow = true;

@@ -277,14 +277,14 @@ fn run(options: Options) -> io::Result<()> {
                             if state.process_detail.is_some() {
                                 state.scroll_detail(true, 1, (width, height), &snapshot);
                             } else {
-                                state.scroll(true, 1, &log, width);
+                                state.scroll(true, 1, &log, (width, height), &snapshot);
                             }
                         }
                         Event::Down | Event::Key(b'j') if !state.help => {
                             if state.process_detail.is_some() {
                                 state.scroll_detail(false, 1, (width, height), &snapshot);
                             } else {
-                                state.scroll(false, 1, &log, width);
+                                state.scroll(false, 1, &log, (width, height), &snapshot);
                             }
                         }
                         Event::Key(b'p' | b'\r' | b'\n') if !state.help => {
@@ -304,8 +304,7 @@ fn run(options: Options) -> io::Result<()> {
                             state.paused = !state.paused;
                         }
                         Event::Key(b'f') if !state.help && state.process_detail.is_none() => {
-                            state.follow = true;
-                            state.offset = 0;
+                            state.follow_log();
                         }
                         Event::Key(b'?') => {
                             state.dragging_divider = None;
@@ -330,8 +329,8 @@ fn run(options: Options) -> io::Result<()> {
         if Instant::now() >= next_tick {
             if !state.paused {
                 state.tick += 1;
-                let old_log =
-                    (!state.follow).then(|| (log.visible_lines(), log.cursor(), log.generation));
+                let old_log = (!state.follow && state.log_history.is_none())
+                    .then(|| (log.visible_lines(), log.cursor(), log.generation));
                 snapshot = if options.demo {
                     monitor::demo(state.tick)
                 } else {
@@ -343,6 +342,7 @@ fn run(options: Options) -> io::Result<()> {
                 } else {
                     log.refresh();
                 }
+                state.sync_log_history(&log);
                 state.estimate = if options.demo {
                     demo_estimate(state.tick)
                 } else {

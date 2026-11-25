@@ -137,7 +137,9 @@ Storage is filesystem capacity, not recursive project size. “Free” is user-a
 
 Retained log text wraps to the panel width. Narrowing the terminal creates additional display rows rather than cutting off the right-hand side. Scroll with the wheel or arrow keys to inspect older parts, including rows within a single long record; `f` returns to the latest output.
 
-The monitor intentionally retains only 200 completed records and a partial record, keeping at most 4096 raw bytes per record. It reads a recent 64 KiB window per refresh and can skip older data during a burst or after a long pause. These ingestion bounds still apply after wrapping. Read the original log with another tool when you need complete history beyond them.
+The live ingestion ring retains 200 completed records and a partial record. Scrolling up in Build Log reads earlier records from the selected file on demand, beyond that ring and including output from before monitoring began. Reading history does not pause sampling or jump when new output arrives. Scroll down to the newest output or press `f` to resume following. History reads use 64 KiB pages with a bounded 4096-record/256 KiB text cache and no duplicate disk file. The 4096-raw-byte display limit per record still applies.
+
+Uncached history depends on the original log remaining readable. If the file is removed, cached text remains visible but older pages cannot be fetched. Detected rotation or truncation resets the view to the current file; same-inode truncate-and-regrow between samples may remain undetected. Demo mode has no backing file and keeps its bounded in-memory history.
 
 ## Reduce monitoring overhead
 

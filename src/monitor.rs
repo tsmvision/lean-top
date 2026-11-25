@@ -393,6 +393,74 @@ pub fn progress(line: &str) -> Option<(u64, u64)> {
 }
 
 #[derive(Default)]
+pub struct LogHistory {
+    records: VecDeque<(String, u64, u64, bool)>,
+    pub start: u64,
+    pub end: u64,
+    pub generation: u64,
+}
+
+impl LogHistory {
+    pub fn lines(&self) -> Vec<String> {
+        self.records.iter().map(|record| record.0.clone()).collect()
+    }
+
+    pub fn forward_start(&self) -> u64 {
+        self.records
+            .back()
+            .filter(|record| !record.3)
+            .map(|record| record.1)
+            .unwrap_or(self.end)
+    }
+
+    // Keep a bounded cache around the reading position; older/newer data stays
+    // in the original log file, rather than a second on-disk copy.
+    pub fn extend(&mut self, mut page: Self, older: bool) -> Vec<String> {
+        let mut removed_back = Vec::new();
+        if older {
+            self.start = page.start;
+            page.records.append(&mut self.records);
+            self.records = page.records;
+        } else {
+            while self
+                .records
+                .back()
+                .is_some_and(|record| record.2 > page.start)
+            {
+                removed_back.push(self.records.pop_back().unwrap().0);
+            }
+            self.end = page.end;
+            self.records.append(&mut page.records);
+        }
+        let removed = self.trim(older);
+        if older {
+            removed_back.extend(removed);
+        }
+        removed_back
+    }
+
+    fn trim(&mut self, older: bool) -> Vec<String> {
+        let mut bytes: usize = self.records.iter().map(|record| record.0.len()).sum();
+        let mut removed = Vec::new();
+        while self.records.len() > 4096 || bytes > 262144 {
+            let record = if older {
+                self.records.pop_back().unwrap()
+            } else {
+                self.records.pop_front().unwrap()
+            };
+            bytes -= record.0.len();
+            if older {
+                self.end = record.1;
+            } else {
+                self.start = record.2;
+            }
+            removed.push(record.0);
+        }
+        removed
+    }
+}
+
+#[derive(Default)]
 pub struct LogTail {
     pub path: Option<PathBuf>,
     pub lines: VecDeque<String>,
@@ -407,6 +475,101 @@ pub struct LogTail {
 }
 
 impl LogTail {
+    pub fn history_before(&self, end: Option<u64>) -> std::io::Result<LogHistory> {
+        let end = end.unwrap_or(self.position).min(self.position);
+        self.history_window(end.saturating_sub(65536), end, true)
+    }
+
+    pub fn history_after(&self, start: u64) -> std::io::Result<LogHistory> {
+        self.history_window(start, start.saturating_add(65536).min(self.position), false)
+    }
+
+    fn history_window(&self, start: u64, end: u64, older: bool) -> std::io::Result<LogHistory> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        #[cfg(target_os = "linux")]
+        const NONBLOCK: i32 = 0x800;
+        #[cfg(not(target_os = "linux"))]
+        const NONBLOCK: i32 = 0x4;
+        let path = self.path.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no log file selected")
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NONBLOCK)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || self.identity != Some((metadata.dev(), metadata.ino()))
+            || metadata.len() < end
+            || start > end
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "log changed; return to live output with f",
+            ));
+        }
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.take(end - start).read_to_end(&mut bytes)?;
+        let mut first = 0;
+        let mut last = bytes.len();
+        if older && start > 0 {
+            if let Some(delimiter) = bytes.iter().position(|b| *b == b'\n' || *b == b'\r') {
+                first = delimiter + 1;
+            }
+        }
+        if !older && end < self.position {
+            if let Some(delimiter) = bytes.iter().rposition(|b| *b == b'\n' || *b == b'\r') {
+                last = delimiter + 1;
+            }
+        }
+        let mut page = LogHistory {
+            start: start + first as u64,
+            end: start + last as u64,
+            generation: self.generation,
+            ..LogHistory::default()
+        };
+        let mut begin = first;
+        for index in first..last {
+            if bytes[index] == b'\n' || bytes[index] == b'\r' {
+                let line = Self::display_line(&String::from_utf8_lossy(
+                    &bytes[begin..index.min(begin + 4096)],
+                ));
+                if !line.trim().is_empty()
+                    && !(progress(&line).is_some()
+                        && page.records.back().is_some_and(|record| record.0 == line))
+                {
+                    page.records.push_back((
+                        line,
+                        start + begin as u64,
+                        start + index as u64 + 1,
+                        true,
+                    ));
+                }
+                begin = index + 1;
+            }
+        }
+        if begin < last {
+            let line = Self::display_line(&String::from_utf8_lossy(
+                &bytes[begin..last.min(begin + 4096)],
+            ));
+            if !line.trim().is_empty()
+                && !(progress(&line).is_some()
+                    && page.records.back().is_some_and(|record| record.0 == line))
+            {
+                page.records.push_back((
+                    line,
+                    start + begin as u64,
+                    page.end,
+                    page.end < self.position,
+                ));
+            }
+        }
+        // The first page can contain many tiny records as well.
+        page.trim(!older);
+        Ok(page)
+    }
+
     fn display_line(text: &str) -> String {
         let mut line = clean(text);
         // Lake's spinner is animation, not a new build event.
@@ -528,6 +691,10 @@ impl LogTail {
     pub fn cursor(&self) -> u64 {
         self.lines_added
             .saturating_add(u64::from(self.pending_line().is_some()))
+    }
+
+    pub fn position(&self) -> u64 {
+        self.position
     }
 
     pub fn current_progress(&self) -> Option<(u64, u64)> {

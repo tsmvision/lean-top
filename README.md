@@ -124,7 +124,7 @@ The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller 
 
 Unchanged log rows stay on screen while resource metrics continue to refresh. The log's last-read time is a fixed UTC timestamp that changes only when new bytes are read, rather than a continuously advancing age counter. Scrolling, help, and terminal resizing can still redraw the affected area.
 
-Log text wraps to the panel width, including when the terminal narrows. Scroll through display rows to inspect every retained part of a long record; continuation rows keep the original severity color. The original 200-record/4 KiB-per-record retention limits still apply. CPU shows its current utilization bar; the history graph has been removed.
+Log text wraps to the panel width, including when the terminal narrows. Scroll through display rows to inspect every retained part of a long record; continuation rows keep the original severity color. The live tail keeps 200 records; scrolling up reads older records from the original log file on demand, so scrollback is not limited to those 200 records. The 4 KiB raw-byte display limit per record still applies. CPU shows its current utilization bar; the history graph has been removed.
 
 ## Controls and options
 
@@ -144,7 +144,7 @@ Log text wraps to the panel width, including when the terminal narrows. Scroll t
 | `f` | Resume following the latest log output when details/help are closed |
 | `?` | Toggle keyboard help |
 
-Hover over the panel you want to scroll; clicking to focus is unnecessary. The two panels keep independent positions. Process scrolling leaves log following unchanged. Log scrolling disables automatic following; press `f` to return to the live tail. Mouse scrolling also works while sampling is paused and is ignored while help is open. It requires a terminal that forwards XTerm-compatible mouse reports. The log's existing keyboard controls remain available. Unchanged visible log text is left on screen while system metrics update. Repeated Lake spinner frames with the same progress content do not append history. New or changed log text updates only the affected character spans without clearing rows; scrolling, reflow, overlays, and panel movement redraw the affected content.
+Hover over the panel you want to scroll; clicking to focus is unnecessary. The two panels keep independent positions. Process scrolling leaves log following unchanged. Log scrolling disables automatic following and preserves the reading position while new output arrives. Scroll down to the live end or press `f` to resume following. Older content is read from the selected log file in 64 KiB pages, including output written before the monitor started; no duplicate history file is created. Mouse scrolling also works while sampling is paused and is ignored while help is open. It requires a terminal that forwards XTerm-compatible mouse reports. The log's existing keyboard controls remain available. Unchanged visible log text is left on screen while system metrics update. Repeated Lake spinner frames with the same progress content do not append history. New or changed log text updates only the affected character spans without clearing rows; scrolling, reflow, overlays, and panel movement redraw the affected content.
 
 The process table shows only type, memory, and a short target name. Open details to read full paths and command arguments, using the wheel or arrow keys to scroll long values. Details track the selected PID across sorting changes and label the last captured data if that process is no longer visible. Metrics continue updating behind the panel. Compiler targets are detected from kernel-provided arguments; relative paths are resolved against the process working directory when permissions allow. Lake rows show their command label, such as `build`, rather than a fabricated source filename.
 
@@ -197,7 +197,7 @@ Log progress can belong to an earlier run and does not supply a build exit code.
 
 ## Resource design
 
-The monitor reads `/proc` and filesystem metadata directly instead of spawning `top`, `ps`, or `df` on every refresh. It sleeps between updates and redraws changed terminal rows. Log ingestion is bounded to a recent 64 KiB window per refresh, with 200 completed lines retained and a 4 KiB raw-byte limit per line, plus a partial line. Older output may be skipped to keep up.
+The monitor reads `/proc` and filesystem metadata directly instead of spawning `top`, `ps`, or `df` on every refresh. It sleeps between updates and redraws changed terminal rows. Log ingestion is bounded to a recent 64 KiB window per refresh, with 200 completed lines retained and a 4 KiB raw-byte limit per line, plus a partial line. Live ingestion may skip older output to keep up, but scrolling can retrieve it while it remains in the original file. The scrollback cache retains at most 4096 records and 256 KiB of text plus record metadata; it loads pages only during navigation. Detected rotation or truncation returns the view to the current log.
 
 The monitor makes no network requests and does not persist metrics, logs, or configuration. Build-log writes in the example come from `tee`. Actual CPU and memory costs depend on process count, log volume, terminal size, and refresh interval; no fixed overhead budget is guaranteed.
 
