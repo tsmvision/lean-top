@@ -653,7 +653,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         };
         frame.rule(
             process_region.start,
-            &format!("PROCESSES · server-wide · {range}"),
+            &format!("PROCESSES · {range}"),
         );
         frame.text(
             2,

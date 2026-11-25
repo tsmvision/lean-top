@@ -69,7 +69,7 @@ BUILD
 ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680 jobs
 Latest event   ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
-PROCESSES · server-wide · 1-3 / 6
+PROCESSES · 1-3 / 6
 PID      NAME      MEMORY       COMMAND
 28416    lean      1.8 GiB      lean RiemannHypothesis/ExplicitFormula.lean
 28421    lean      1.2 GiB      lean RiemannHypothesis/ZetaBounds.lean
