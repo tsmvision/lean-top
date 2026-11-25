@@ -679,14 +679,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             );
         }
     }
-    let title = if state.dragging_log {
-        "BUILD LOG · RESIZING"
-    } else if state.follow {
-        "BUILD LOG · FOLLOW ON · drag to resize"
-    } else {
-        "BUILD LOG · SCROLL · drag to resize"
-    };
-    frame.rule(log_y, title);
+    frame.rule(log_y, "BUILD LOG");
     let available = (h - 2).saturating_sub(log_y + 1);
     let mut messages = Vec::new();
     if let Some(error) = &log.error {
@@ -1041,7 +1034,6 @@ mod tests {
             "BUILD",
             "PROCESSES",
             "BUILD LOG",
-            "FOLLOW ON",
             "0.5s",
         ] {
             assert!(text.contains(label), "missing {label}");

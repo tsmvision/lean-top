@@ -89,11 +89,11 @@ def exercise(binary, quit_key=None):
         assert_panel_only(output, 19, 24)
 
         # Scroll older/newer log records without repainting process rows.
-        output = event_output(b"\x1b[<64;10;28M", b"SCROLL")
+        output = event_output(b"\x1b[<64;10;28M")
         assert_panel_only(output, 25, 36)
         output = event_output(b"\x1b[<65;10;28M")
         assert_panel_only(output, 25, 36)
-        event_output(b"f", b"FOLLOW ON")
+        event_output(b"f")
 
         assert event_output(b"\x1b[<65;5;7M") == b"", "Wheel outside panels must be ignored"
         assert event_output(b"\x1b[<0;10;22M") == b"", "Click must not scroll"
@@ -104,28 +104,28 @@ def exercise(binary, quit_key=None):
         event_output(b"?")
 
         # Drag the log header (row25) upward to row23, then downward to row29.
-        event_output(b"\x1b[<0;10;25M", b"RESIZING")
+        event_output(b"\x1b[<0;10;25M")
         output = event_output(b"\x1b[<32;10;23M", b"1-1 / 6")
         assert_panel_only(output, 19, 36)
-        assert b"\x1b[23;1H" in output and b"RESIZING" in output
-        event_output(b"\x1b[<0;10;23m", b"FOLLOW ON")
+        assert b"\x1b[23;1H" in output and b"BUILD LOG" in output
+        event_output(b"\x1b[<0;10;23m")
         # No held left button means a stray motion must not change the height.
         assert event_output(b"\x1b[<32;10;29M") == b""
-        event_output(b"\x1b[<0;10;23M", b"RESIZING")
+        event_output(b"\x1b[<0;10;23M")
         output = event_output(b"\x1b[<32;10;29M", b"1-6 / 6")
         assert_panel_only(output, 19, 36)
-        assert b"\x1b[29;1H" in output and b"RESIZING" in output
-        event_output(b"\x1b[<0;10;29m", b"FOLLOW ON")
+        assert b"\x1b[29;1H" in output and b"BUILD LOG" in output
+        event_output(b"\x1b[<0;10;29m")
         # Mouse routing follows the moved divider, not its original row25.
-        output = event_output(b"\x1b[<64;10;32M", b"SCROLL")
+        output = event_output(b"\x1b[<64;10;32M")
         assert_panel_only(output,29,36)
-        event_output(b"f", b"FOLLOW ON")
+        event_output(b"f")
         # Restore the original split before exercising existing keyboard keys.
-        event_output(b"\x1b[<0;10;29M", b"RESIZING")
+        event_output(b"\x1b[<0;10;29M")
         event_output(b"\x1b[<32;10;25M", b"1-3 / 6")
-        event_output(b"\x1b[<0;10;25m", b"FOLLOW ON")
-        expect(b"SCROLL", b"\x1b[A")
-        expect(b"FOLLOW ON", b"f")
+        event_output(b"\x1b[<0;10;25m")
+        assert_panel_only(event_output(b"\x1b[A"),25,36)
+        event_output(b"f")
         expect(b"DEMO", b" ")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         expect(b"LEAN TOP")

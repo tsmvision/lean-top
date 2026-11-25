@@ -75,7 +75,7 @@ PID      NAME      MEMORY       COMMAND
 28421    lean      1.2 GiB      lean RiemannHypothesis/ZetaBounds.lean
 28431    lean      800 MiB      lean RiemannHypothesis/ZeroFreeRegion.lean
 
-BUILD LOG · FOLLOW ON
+BUILD LOG
 ✔ [340/680] Built RiemannHypothesis.ZetaBounds
 warning: ExplicitFormula.lean:128: unused variable `h`
 ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
