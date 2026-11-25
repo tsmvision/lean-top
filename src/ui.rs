@@ -30,7 +30,7 @@ impl Layout {
         }
         let full = width >= 90 && height >= 32;
         let automatic = requested.is_none();
-        let minimum = [3, 3, if full { 3 } else { 0 }];
+        let minimum = [3, 4, if full { 3 } else { 0 }];
         let mut requested = requested.unwrap_or(if full {
             [7, 7, process_count.saturating_add(3).max(3)]
         } else {
@@ -44,7 +44,7 @@ impl Layout {
                 .fold(0usize, |sum, value| sum.saturating_add(*value))
                 .saturating_sub(height - 10);
             for index in [1, 0] {
-                let shrink = requested[index].saturating_sub(3).min(excess);
+                let shrink = requested[index].saturating_sub(minimum[index]).min(excess);
                 requested[index] -= shrink;
                 excess -= shrink;
             }
@@ -635,12 +635,14 @@ impl ViewState {
                     return true;
                 }
                 let (upper, lower) = layout.adjacent(index).unwrap();
-                let lower_minimum = if lower.start == layout.log.as_ref().unwrap().start {
-                    4
-                } else {
-                    3
-                };
-                let divider = row.clamp(upper.start + 3, lower.end - lower_minimum);
+                let lower_minimum =
+                    if lower.start == layout.log.as_ref().unwrap().start || index == 0 {
+                        4
+                    } else {
+                        3
+                    };
+                let upper_minimum = if index == 1 { 4 } else { 3 };
+                let divider = row.clamp(upper.start + upper_minimum, lower.end - lower_minimum);
                 let mut requested = [
                     layout.resources.len(),
                     layout.build.len(),
@@ -1001,7 +1003,8 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                 "Est. time: waiting for source analysis…".into()
             }
             _ if state.estimate.files.is_none() => "Est. time: unavailable".into(),
-            _ => "Est. time: learning from completed modules…".into(),
+            _ if log.path.is_none() && !state.demo => "Est. time: no build log (set --log)".into(),
+            _ => "Est. time: no timing data in build log".into(),
         };
         frame.text(2, progress_y + 1, &time, Color::Text, inside);
     }
@@ -1262,6 +1265,77 @@ fn render_detail(frame: &mut Frame, selected: &Process, snapshot: &Snapshot, off
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_time_stays_visible_at_minimum_height_and_with_many_processes() {
+        let mut snapshot = crate::monitor::demo(0);
+        snapshot.processes = (0..200).map(|_| snapshot.processes[0].clone()).collect();
+        let log = LogTail::default();
+        for (width, height) in [(52, 20), (79, 24), (90, 32), (110, 38)] {
+            for preference in [None, Some([usize::MAX, 0, usize::MAX]), Some([3, 0, 3])] {
+                let mut state = ViewState {
+                    pane_heights: preference,
+                    demo: true,
+                    estimate: Estimate {
+                        files: Some(120),
+                        completed: 34,
+                        additional: 0,
+                        total_seconds: Some(180.0),
+                        remaining_seconds: Some(129.0),
+                        scope: "test".into(),
+                    },
+                    ..ViewState::default()
+                };
+                let layout = Layout::new(width, height, preference, snapshot.processes.len());
+                assert!(layout.build.len() >= 4);
+                let (upper, lower) = layout.adjacent(1).unwrap();
+                state.mouse(MouseKind::Press, 9, lower.start, (width, height), &snapshot);
+                state.mouse(MouseKind::Drag, 9, 0, (width, height), &snapshot);
+                let after =
+                    Layout::new(width, height, state.pane_heights, snapshot.processes.len());
+                assert_eq!(after.build.start, upper.start);
+                assert!(after.build.len() >= 4);
+                let frame = render(
+                    &View {
+                        snapshot: &snapshot,
+                        log: &log,
+                        state: &state,
+                        project: "/srv/riemann",
+                        host: "ubuntu",
+                        cores: 16,
+                        interval_ms: 500,
+                    },
+                    width,
+                    height,
+                );
+                let text = frame.plain();
+                let rows: Vec<_> = text.lines().collect();
+                let build = rows[after.build.clone()].join("\n");
+                assert!(
+                    build.contains("Est. time ≈ 3m 0s total"),
+                    "{width}x{height}: {build}"
+                );
+                assert!(build.contains("2m 9s left"));
+                state.estimate.total_seconds = None;
+                state.estimate.remaining_seconds = None;
+                assert!(render(
+                    &View {
+                        snapshot: &snapshot,
+                        log: &log,
+                        state: &state,
+                        project: "/srv/riemann",
+                        host: "ubuntu",
+                        cores: 16,
+                        interval_ms: 500
+                    },
+                    width,
+                    height
+                )
+                .plain()
+                .contains("Est. time: no timing data"));
+            }
+        }
+    }
 
     #[test]
     fn default_process_pane_shows_all_rows_when_space_allows_and_keeps_log_minimum() {

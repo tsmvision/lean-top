@@ -250,7 +250,7 @@ impl Estimator {
                     && span >= 1.0)
                     .then_some((last_count - first_count) as f64 / span)
             });
-        let seed_rate = if self.timings.len() >= 3 {
+        let seed_rate = if !self.timings.is_empty() {
             let mean = self.timings.iter().sum::<f64>() / self.timings.len() as f64;
             let workers = snapshot
                 .processes
@@ -845,6 +845,31 @@ mod tests {
             assert!(built_module(line).is_none(), "{line}");
         }
         assert_eq!(built_module("✔ [1/5] Built A (NaNs)"), Some(("A", None)));
+    }
+
+    #[test]
+    fn one_duration_seeds_eta_and_untimed_live_completions_can_replace_it() {
+        let now = Instant::now();
+        let mut seeded = estimator(plan());
+        let mut history = LogTail::default();
+        history.push("✔ [1/8] Built A (6s)".into());
+        let estimate = seeded.refresh_at(&history, &Snapshot::default(), now);
+        assert_eq!(estimate.total_seconds, Some(12.0));
+        assert_eq!(estimate.remaining_seconds, Some(12.0));
+
+        let mut live = estimator(plan());
+        let mut log = LogTail::default();
+        assert_eq!(
+            live.refresh_at(&log, &Snapshot::default(), now)
+                .total_seconds,
+            None
+        );
+        log.push("✔ [1/8] Built A".into());
+        live.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(1));
+        log.push("✔ [2/8] Built B".into());
+        let estimate = live.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(3));
+        assert_eq!(estimate.total_seconds, Some(4.0));
+        assert_eq!(estimate.remaining_seconds, Some(0.0));
     }
 
     #[test]
