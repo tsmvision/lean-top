@@ -7,8 +7,9 @@
 | File | Responsibility |
 | --- | --- |
 | `src/main.rs` | CLI validation, sampling schedule, keyboard dispatch, demo generation, snapshot output |
+| `src/input.rs` | Bounded keyboard, SGR mouse, and legacy X10 input decoding |
 | `src/monitor.rs` | System snapshots, Lean process discovery, bounded log tailing, output sanitization, progress parsing |
-| `src/ui.rs` | Full and compact layouts, terminal cells, colors, CPU history, log scrolling, row-difference rendering |
+| `src/ui.rs` | Shared layout and mouse hit testing, terminal cells, colors, CPU history, independent panel scrolling, row-difference rendering |
 | `src/terminal.rs` | TTY setup/restoration, terminal dimensions, alternate screen, shutdown signals |
 | `src/monitor_tests.rs` | Synthetic system and log tests |
 
@@ -26,7 +27,7 @@ CPU utilization uses differences between aggregate `/proc/stat` counters. Idle i
 
 Memory uses `MemTotal` and `MemAvailable` from `/proc/meminfo`. Swap uses `SwapTotal` and `SwapFree`. Load averages come from `/proc/loadavg`.
 
-Process discovery visits numeric `/proc` entries and matches `comm` against `lean`, `lake`, and `leanc`. It reads RSS from `status` and at most 4096 bytes of `cmdline`. Processes may disappear during a scan; missing process details are tolerated. Results are sorted by RSS, and the full layout displays the first three. Discovery is server-wide and does not associate processes with `--project`.
+Process discovery visits numeric `/proc` entries and matches `comm` against `lean`, `lake`, and `leanc`. It reads RSS from `status` and at most 4096 bytes of `cmdline`. Processes may disappear during a scan; missing process details are tolerated. Results are sorted by RSS, and the full layout defaults to a scrollable window of three rows. Resizing the log changes the process viewport height. The process offset is independent of log scrolling and clamped when the list shrinks or its viewport grows. Discovery is server-wide and does not associate processes with `--project`.
 
 Storage calls `statvfs` directly for the project directory. The implementation uses a 64-bit Linux ABI declaration; unsupported targets report unavailable storage. Used space excludes filesystem free blocks, while the displayed free space uses blocks available to an unprivileged user. The monitor does not recursively measure project or `.lake` directory sizes, and it does not measure disk I/O throughput.
 
@@ -47,6 +48,10 @@ The counters are Lake job observations, not completed source-file counts. Depend
 Frames consist of character/color cells. Only changed rows are emitted using ANSI cursor movement; an identical frame produces no output or flush. Unchanged log rows are left on screen as resource metrics update. The log's last-read indicator uses a fixed UTC wall-clock timestamp captured when bytes arrive, avoiding timer-only repaints. User interactions and terminal resizing still redraw the affected rows. Interactive mode uses `stty` when entering and leaving raw mode, not during ordinary refreshes. The alternate screen and cursor are restored on normal exit; handlers for hangup, interrupt, and termination request exit through the main loop.
 
 One physical terminal column is reserved to avoid automatic wrapping. The full layout uses at least 90 drawing columns × 32 rows, which means a terminal at least 91 columns wide. The compact layout uses at least 52 drawing columns × 20 rows, requiring 53 physical columns. Smaller sizes show a resize message. The render area is capped at 300 drawing columns × 120 rows.
+
+Interactive mode enables normal tracking (1000), button-event tracking (1002), and SGR coordinates (1006); it does not enable unrestricted pointer-motion reporting. The decoder also consumes legacy X10 packets, bounds CSI payloads to 64 bytes, and ignores right clicks, hover-only motion, and horizontal wheel events. Its zero-based coordinates are hit-tested against the same layout used by the renderer. Wheel events move the process list by one row or the log by three rows, depending on pointer location; events outside those panels or over an open help overlay are ignored. Keyboard arrows and `j`/`k` continue to target logs. Mouse capture is disabled on normal exit and handled shutdown, alongside terminal restoration. Protocol details follow the [XTerm mouse tracking specification](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Mouse-Tracking).
+
+A left-button press on the log's header begins divider dragging. Button-motion updates its requested height; releasing the button ends the gesture. The layout reserves at least three log content rows and, in full mode, one process row plus table headings. Compact mode does not move the fixed resource/build summaries. Requested log height is held in memory for the current session and clamped to the current terminal bounds. Resizing preserves log scroll/follow state, recomputes process scroll bounds, and updates wheel hit testing to the new divider. Help blocks drag initiation and cancels active dragging.
 
 The renderer handles common CJK characters as double-width and omits common combining/format marks. Complex emoji and joined grapheme clusters are outside its width model. A UTF-8 monospace terminal is recommended. `--no-color` and `NO_COLOR` disable colors but retain ANSI cursor positioning; `--snapshot` provides plain output.
 

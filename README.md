@@ -65,15 +65,15 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
                       Swap 0 MiB / 4.0 GiB
 
 BUILD
-● ACTIVE    3 Lean/Lake processes · server-wide
+● ACTIVE    6 Lean/Lake processes · server-wide
 ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680 jobs
 Latest event   ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
-PROCESSES · server-wide
+PROCESSES · server-wide · 1-3 / 6
 PID      NAME      MEMORY       COMMAND
 28416    lean      1.8 GiB      lean RiemannHypothesis/ExplicitFormula.lean
 28421    lean      1.2 GiB      lean RiemannHypothesis/ZetaBounds.lean
-28390    lake      84 MiB       lake build
+28431    lean      800 MiB      lean RiemannHypothesis/ZeroFreeRegion.lean
 
 BUILD LOG · FOLLOW ON
 ✔ [340/680] Built RiemannHypothesis.ZetaBounds
@@ -91,12 +91,19 @@ Unchanged log rows stay on screen while resource metrics continue to refresh. Th
 
 | Key | Action |
 | --- | --- |
+| Mouse wheel over Processes | Scroll that process list up/down; full layout only |
+| Mouse wheel over Build Log | Scroll older/newer retained log lines |
+| Left-drag the Build Log header | Resize its height within the available space |
 | `q` or `Ctrl-C` | Quit the monitor; the separate build continues |
 | `Space` | Pause/resume metric sampling and log reading |
 | `↑` / `k` | Scroll toward older retained log lines |
 | `↓` / `j` | Scroll toward newer retained log lines |
 | `f` | Resume following the latest output |
 | `?` | Toggle keyboard help |
+
+Hover over the panel you want to scroll; clicking to focus is unnecessary. The two panels keep independent positions. Process scrolling leaves log following unchanged. Log scrolling disables automatic following; press `f` to return to the live tail. Mouse scrolling also works while sampling is paused and is ignored while help is open. It requires a terminal that forwards XTerm-compatible mouse reports. The log's existing keyboard controls remain available.
+
+To resize the log, hold the left mouse button on its top divider (the row labeled `BUILD LOG`) and drag up or down. In the full layout, the Processes panel uses the remaining space. The application keeps at least one process row and three log rows visible. Compact mode keeps the resource and build summaries fixed and lets you shrink or expand logs within the remaining space. The chosen height is retained for the current session and clamped when the terminal becomes smaller. Resizing keeps the log's scroll position and follow mode.
 
 | Option | Meaning |
 | --- | --- |
@@ -120,7 +127,7 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **CPU** is aggregate server utilization calculated from consecutive `/proc/stat` samples, on a 0–100% scale. The first sample has no rate yet. Load averages cover 1, 5, and 15 minutes.
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
-- **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. The full screen shows the first three. They are not filtered by project.
+- **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. The full screen defaults to a scrollable window of three rows; resizing the log changes the space available for processes. The heading shows the visible range and total. The process list remains live, so ordering can change with RSS and process exits. Processes are not filtered by project.
 - **ACTIVE/IDLE** reflects whether any of those processes were detected. **Lake jobs** preserves the latest `[reported/total]` pair from a recognized Lake status record, including a running spinner before its trailing newline. “Latest event” shows a recent retained Lake status record.
 
 Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).

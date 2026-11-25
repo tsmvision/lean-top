@@ -60,7 +60,7 @@ impl Terminal {
             signal(2, stop);
             signal(15, stop);
         }
-        print!("\x1b[?1049h\x1b[?25l\x1b[2J");
+        print!("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[2J");
         io::stdout().flush()?;
         Ok(terminal)
     }
@@ -73,7 +73,7 @@ impl Drop for Terminal {
             .stdin(Stdio::inherit())
             .status();
         let mut stdout = io::stdout().lock();
-        let _ = stdout.write_all(b"\x1b[0m\x1b[?25h\x1b[?1049l");
+        let _ = stdout.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l");
         let _ = stdout.flush();
     }
 }

@@ -1,6 +1,47 @@
+use crate::input::MouseKind;
 use crate::monitor::{clean, progress, LogTail, Snapshot};
 use std::collections::VecDeque;
 use std::fmt::Write;
+use std::ops::Range;
+
+/// The renderer and mouse hit testing share the exact same panel boundaries.
+struct Layout {
+    build_y: usize,
+    processes: Option<Range<usize>>,
+    log: Option<Range<usize>>,
+}
+
+impl Layout {
+    fn new(width: usize, height: usize, log_height: Option<usize>) -> Self {
+        if width < 52 || height < 20 {
+            return Self {
+                build_y: 0,
+                processes: None,
+                log: None,
+            };
+        }
+        let full = width >= 90 && height >= 32;
+        let build_y = if full { 11 } else { 7 };
+        let minimum_y = build_y + if full { 11 } else { 6 };
+        let default_y = build_y + if full { 13 } else { 6 };
+        let log_y = log_height
+            .map(|rows| height.saturating_sub(3).saturating_sub(rows))
+            .unwrap_or(default_y)
+            .clamp(minimum_y, height - 6);
+        Self {
+            build_y,
+            processes: full.then_some(build_y + 7..log_y),
+            log: Some(log_y..height - 2),
+        }
+    }
+
+    fn process_rows(&self) -> usize {
+        self.processes
+            .as_ref()
+            .map(|range| range.len().saturating_sub(3))
+            .unwrap_or(0)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Color {
@@ -249,6 +290,9 @@ pub struct ViewState {
     pub paused: bool,
     pub follow: bool,
     pub offset: usize,
+    pub process_offset: usize,
+    pub log_height: Option<usize>,
+    pub dragging_log: bool,
     pub help: bool,
     pub history: VecDeque<f64>,
     pub demo: bool,
@@ -274,6 +318,90 @@ impl ViewState {
             self.offset.saturating_sub(count)
         };
     }
+
+    pub fn clamp_processes(&mut self, count: usize, size: (usize, usize)) {
+        let rows = Layout::new(size.0, size.1, self.log_height).process_rows();
+        self.process_offset = self.process_offset.min(count.saturating_sub(rows.max(1)));
+    }
+
+    pub fn mouse(
+        &mut self,
+        kind: MouseKind,
+        column: usize,
+        row: usize,
+        size: (usize, usize),
+        snapshot: &Snapshot,
+    ) -> bool {
+        let (width, height) = size;
+        let layout = Layout::new(width, height, self.log_height);
+        if self.help || layout.log.is_none() {
+            return std::mem::replace(&mut self.dragging_log, false);
+        }
+        match kind {
+            MouseKind::Press => {
+                let active =
+                    column > 0 && column < width - 1 && row == layout.log.as_ref().unwrap().start;
+                let previous = std::mem::replace(&mut self.dragging_log, active);
+                previous != active
+            }
+            MouseKind::Drag if self.dragging_log => {
+                let minimum_y = layout.build_y + if layout.processes.is_some() { 11 } else { 6 };
+                let divider = row.clamp(minimum_y, height - 6);
+                let requested = Some(height - 3 - divider);
+                let changed = self.log_height != requested;
+                self.log_height = requested;
+                self.clamp_processes(snapshot.processes.len(), size);
+                changed
+            }
+            MouseKind::Release => std::mem::replace(&mut self.dragging_log, false),
+            _ => false,
+        }
+    }
+
+    pub fn wheel(
+        &mut self,
+        up: bool,
+        column: usize,
+        row: usize,
+        size: (usize, usize),
+        snapshot: &Snapshot,
+        log: &LogTail,
+    ) -> bool {
+        let (width, height) = size;
+        if self.help || self.dragging_log || column == 0 || column >= width.saturating_sub(1) {
+            return false;
+        }
+        let layout = Layout::new(width, height, self.log_height);
+        if layout
+            .processes
+            .as_ref()
+            .is_some_and(|range| range.contains(&row))
+        {
+            let previous = self.process_offset;
+            self.clamp_processes(snapshot.processes.len(), size);
+            self.process_offset = if up {
+                self.process_offset.saturating_sub(1)
+            } else {
+                self.process_offset.saturating_add(1).min(
+                    snapshot
+                        .processes
+                        .len()
+                        .saturating_sub(layout.process_rows()),
+                )
+            };
+            self.process_offset != previous
+        } else if layout
+            .log
+            .as_ref()
+            .is_some_and(|range| range.contains(&row))
+        {
+            let previous = (self.follow, self.offset);
+            self.scroll(up, 3, log);
+            previous != (self.follow, self.offset)
+        } else {
+            false
+        }
+    }
 }
 
 pub struct View<'a> {
@@ -288,7 +416,8 @@ pub struct View<'a> {
 
 pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     let mut frame = Frame::new(width, height);
-    if width < 52 || height < 20 {
+    let layout = Layout::new(width, height, view.state.log_height);
+    if layout.log.is_none() {
         frame.text(1, 1, "LEAN TOP", Color::Cyan, width.saturating_sub(2));
         frame.text(
             1,
@@ -347,8 +476,8 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     frame.text(2, 2, &location, Color::Muted, inside);
     frame.rule(3, "");
 
-    let full = w >= 90 && h >= 32;
-    let resources_end = if full {
+    let full = layout.processes.is_some();
+    if full {
         let col = inside / 3;
         let values = [
             s.cpu
@@ -404,7 +533,6 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             .map(|(_, _, available)| format!("Free {}", bytes(available)))
             .unwrap_or_default();
         frame.text(2 + col * 2, 8, &free, Color::Muted, col - 2);
-        11
     } else {
         for (index, (title, value, percent)) in [
             (
@@ -429,9 +557,8 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             frame.text(11, y, value, Color::Text, 26);
             frame.bar(38, y, w - 41, *percent, pressure(*percent));
         }
-        7
-    };
-    let b = resources_end;
+    }
+    let b = layout.build_y;
     frame.rule(b, "BUILD");
     let active = !s.processes.is_empty();
     let status = if active { "● ACTIVE" } else { "○ IDLE" };
@@ -513,9 +640,21 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         Color::Muted,
         inside,
     );
-    let mut log_y = b + 6;
-    if full {
-        frame.rule(b + 7, "PROCESSES · server-wide");
+    let log_y = layout.log.as_ref().unwrap().start;
+    if let Some(process_region) = &layout.processes {
+        let start = state
+            .process_offset
+            .min(s.processes.len().saturating_sub(layout.process_rows()));
+        let end = (start + layout.process_rows()).min(s.processes.len());
+        let range = if s.processes.is_empty() {
+            "0 / 0".into()
+        } else {
+            format!("{}-{} / {}", start + 1, end, s.processes.len())
+        };
+        frame.rule(
+            process_region.start,
+            &format!("PROCESSES · server-wide · {range}"),
+        );
         frame.text(
             2,
             b + 8,
@@ -523,7 +662,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             Color::Muted,
             inside,
         );
-        for (index, process) in s.processes.iter().take(3).enumerate() {
+        for (index, process) in s.processes[start..end].iter().enumerate() {
             let row = format!(
                 "{:<8} {:<9} {:<12} {}",
                 process.pid,
@@ -542,12 +681,13 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                 inside,
             );
         }
-        log_y = b + 13;
     }
-    let title = if state.follow {
-        "BUILD LOG · FOLLOW ON"
+    let title = if state.dragging_log {
+        "BUILD LOG · RESIZING"
+    } else if state.follow {
+        "BUILD LOG · FOLLOW ON · drag to resize"
     } else {
-        "BUILD LOG · SCROLL"
+        "BUILD LOG · SCROLL · drag to resize"
     };
     frame.rule(log_y, title);
     let available = (h - 2).saturating_sub(log_y + 1);
@@ -599,7 +739,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         if w < 60 {
             "q Quit  Space Pause  ↑↓/jk Logs  f Follow  ? Help"
         } else {
-            "q Quit   Space Pause   ↑↓/jk Scroll   f Follow   ? Help"
+            "q Quit   Space Pause   Wheel Scroll   ↑↓/jk Logs   f Follow   ? Help"
         },
         Color::Muted,
         w - 2,
@@ -607,6 +747,8 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     if state.help {
         let help = [
             "KEYBOARD",
+            "Wheel        Scroll the panel under pointer",
+            "Left drag    Resize the Build Log divider",
             "q / Ctrl-C   Quit monitor (build continues)",
             "Space        Pause sampling and log reading",
             "Up / k       Scroll toward older log lines",
@@ -641,6 +783,235 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn divider_drag_resizes_logs_and_preserves_independent_scroll_state() {
+        let snapshot = crate::monitor::demo(0);
+        let mut state = ViewState {
+            process_offset: 3,
+            offset: 6,
+            follow: false,
+            ..ViewState::default()
+        };
+        assert!(!state.mouse(MouseKind::Drag, 9, 22, (110, 38), &snapshot));
+        assert!(state.mouse(MouseKind::Press, 9, 24, (110, 38), &snapshot));
+        assert!(state.dragging_log);
+        assert!(state.mouse(MouseKind::Drag, 9, 22, (110, 38), &snapshot));
+        let expanded = Layout::new(110, 38, state.log_height);
+        assert_eq!(expanded.log.as_ref().unwrap().start, 22);
+        assert_eq!(expanded.process_rows(), 1);
+        assert_eq!(
+            (state.process_offset, state.offset, state.follow),
+            (3, 6, false)
+        );
+        assert!(state.mouse(MouseKind::Release, 9, 22, (110, 38), &snapshot));
+        let height = state.log_height;
+        assert!(!state.mouse(MouseKind::Drag, 9, 30, (110, 38), &snapshot));
+        assert_eq!(state.log_height, height);
+        assert!(state.mouse(MouseKind::Press, 9, 22, (110, 38), &snapshot));
+        assert!(state.mouse(MouseKind::Drag, 9, usize::MAX, (110, 38), &snapshot));
+        let shrunk = Layout::new(110, 38, state.log_height);
+        assert_eq!(shrunk.log.as_ref().unwrap().len() - 1, 3);
+        assert_eq!(
+            state.process_offset, 0,
+            "A larger process window must clamp its offset"
+        );
+        assert_eq!((state.offset, state.follow), (6, false));
+    }
+
+    #[test]
+    fn divider_hit_testing_and_wheels_follow_the_resized_layout() {
+        let snapshot = crate::monitor::demo(0);
+        let mut log = LogTail::default();
+        for index in 0..30 {
+            log.push(format!("line {index}"));
+        }
+        let mut state = ViewState {
+            follow: true,
+            ..ViewState::default()
+        };
+        assert!(!state.mouse(MouseKind::Press, 9, 21, (110, 38), &snapshot));
+        assert!(!state.mouse(MouseKind::Press, 0, 24, (110, 38), &snapshot));
+        state.mouse(MouseKind::Press, 9, 24, (110, 38), &snapshot);
+        state.mouse(MouseKind::Drag, 9, 30, (110, 38), &snapshot);
+        assert!(!state.wheel(true, 9, 32, (110, 38), &snapshot, &log));
+        state.mouse(MouseKind::Release, 9, 30, (110, 38), &snapshot);
+        assert!(!state.wheel(false, 9, 26, (110, 38), &snapshot, &log));
+        assert!(
+            state.follow,
+            "Former log coordinates now belong to the expanded process pane"
+        );
+        assert!(state.wheel(true, 9, 32, (110, 38), &snapshot, &log));
+        assert!(!state.follow);
+        state.help = true;
+        assert!(!state.mouse(MouseKind::Press, 9, 30, (110, 38), &snapshot));
+        assert!(!state.dragging_log);
+    }
+
+    #[test]
+    fn resized_layouts_keep_minimum_rows_and_fit_terminal_bounds() {
+        let snapshot = crate::monitor::demo(0);
+        let log = LogTail::default();
+        for (width, height) in [(40, 12), (52, 20), (79, 24), (90, 32), (110, 38), (110, 60)] {
+            for requested in [Some(0), Some(3), Some(13), Some(usize::MAX)] {
+                let state = ViewState {
+                    log_height: requested,
+                    ..ViewState::default()
+                };
+                let layout = Layout::new(width, height, requested);
+                if let Some(range) = &layout.log {
+                    assert!(range.len() >= 4);
+                }
+                if layout.processes.is_some() {
+                    assert!(layout.process_rows() >= 1);
+                }
+                let frame = render(
+                    &View {
+                        snapshot: &snapshot,
+                        log: &log,
+                        state: &state,
+                        project: "/srv/riemann",
+                        host: "ubuntu",
+                        cores: 16,
+                        interval_ms: 500,
+                    },
+                    width,
+                    height,
+                );
+                assert_eq!(frame.plain().lines().count(), height);
+                assert!(frame.plain().lines().all(|line| line
+                    .chars()
+                    .map(char_width)
+                    .sum::<usize>()
+                    == width));
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_scrolls_only_the_panel_under_the_pointer() {
+        let snapshot = crate::monitor::demo(0);
+        let mut log = LogTail::default();
+        for index in 0..30 {
+            log.push(format!("log line {index}"));
+        }
+        let mut state = ViewState {
+            follow: true,
+            ..ViewState::default()
+        };
+        let frame = |state: &ViewState| {
+            render(
+                &View {
+                    snapshot: &snapshot,
+                    log: &log,
+                    state,
+                    project: "/srv/riemann",
+                    host: "ubuntu",
+                    cores: 16,
+                    interval_ms: 500,
+                },
+                110,
+                38,
+            )
+        };
+        let before = frame(&state);
+        assert!(state.wheel(false, 9, 21, (110, 38), &snapshot, &log));
+        assert_eq!(
+            (state.process_offset, state.offset, state.follow),
+            (1, 0, true)
+        );
+        let processes_scrolled = frame(&state);
+        assert_eq!(
+            before.cells[..18 * 110],
+            processes_scrolled.cells[..18 * 110]
+        );
+        assert_ne!(
+            before.cells[18 * 110..24 * 110],
+            processes_scrolled.cells[18 * 110..24 * 110]
+        );
+        assert_eq!(
+            before.cells[24 * 110..],
+            processes_scrolled.cells[24 * 110..]
+        );
+        assert!(processes_scrolled.plain().contains("2-4 / 6"));
+        assert!(state.wheel(true, 9, 27, (110, 38), &snapshot, &log));
+        assert_eq!(
+            (state.process_offset, state.offset, state.follow),
+            (1, 3, false)
+        );
+        let logs_scrolled = frame(&state);
+        assert_eq!(
+            processes_scrolled.cells[..24 * 110],
+            logs_scrolled.cells[..24 * 110]
+        );
+        assert_ne!(
+            processes_scrolled.cells[24 * 110..],
+            logs_scrolled.cells[24 * 110..]
+        );
+        assert!(state.wheel(false, 9, 27, (110, 38), &snapshot, &log));
+        assert_eq!((state.process_offset, state.offset), (1, 0));
+        assert!(state.wheel(true, 9, 21, (110, 38), &snapshot, &log));
+        assert_eq!((state.process_offset, state.offset), (0, 0));
+    }
+
+    #[test]
+    fn wheel_ignores_borders_other_panels_help_and_tiny_windows() {
+        let snapshot = crate::monitor::demo(0);
+        let log = LogTail::default();
+        let mut state = ViewState {
+            follow: true,
+            ..ViewState::default()
+        };
+        for (x, y, size) in [
+            (9, 7, (110, 38)),
+            (0, 21, (110, 38)),
+            (109, 21, (110, 38)),
+            (9, 36, (110, 38)),
+            (9, 37, (110, 38)),
+            (999, 21, (110, 38)),
+            (9, 999, (110, 38)),
+            (9, 21, (40, 12)),
+            (9, 7, (79, 24)),
+        ] {
+            assert!(!state.wheel(false, x, y, size, &snapshot, &log));
+            assert_eq!(
+                (state.process_offset, state.offset, state.follow),
+                (0, 0, true)
+            );
+        }
+        // The compact layout routes the same physical row to its visible log,
+        // never to the hidden process panel.
+        assert!(state.wheel(false, 9, 21, (79, 24), &snapshot, &log));
+        assert_eq!(state.process_offset, 0);
+        assert!(!state.follow);
+        state.follow = true;
+        state.help = true;
+        assert!(!state.wheel(false, 9, 21, (110, 38), &snapshot, &log));
+        assert!(!state.wheel(false, 9, 27, (110, 38), &snapshot, &log));
+        assert!(state.follow);
+    }
+
+    #[test]
+    fn process_scroll_bounds_and_shrinking_lists_are_clamped() {
+        let snapshot = crate::monitor::demo(0);
+        let log = LogTail::default();
+        let mut state = ViewState::default();
+        for _ in 0..100 {
+            state.wheel(false, 9, 21, (110, 38), &snapshot, &log);
+        }
+        assert_eq!(state.process_offset, 3);
+        for _ in 0..100 {
+            state.wheel(true, 9, 21, (110, 38), &snapshot, &log);
+        }
+        assert_eq!(state.process_offset, 0);
+        state.process_offset = 100;
+        state.clamp_processes(4, (110, 38));
+        assert_eq!(state.process_offset, 1);
+        for count in [3, 2, 1, 0] {
+            state.clamp_processes(count, (110, 38));
+            assert_eq!(state.process_offset, 0);
+        }
+    }
 
     #[test]
     fn full_layout_matches_approved_sections() {

@@ -73,7 +73,17 @@ Pass the printed absolute path to the monitor's `--log` option.
 
 ## Build status shows ACTIVE for a different project
 
-Process discovery is server-wide. Any visible process named `lean`, `lake`, or `leanc` contributes to ACTIVE status, even if it belongs to another project. `--project` selects the storage filesystem and header directory, not a process filter. The full process table displays only the three largest matching processes by RSS; the status count can be larger.
+Process discovery is server-wide. Any visible process named `lean`, `lake`, or `leanc` contributes to ACTIVE status, even if it belongs to another project. `--project` selects the storage filesystem and header directory, not a process filter. The full process table defaults to a three-row window sorted by RSS, with more or fewer rows after resizing the log. Hover over Processes and use the mouse wheel to see the remaining matching processes; the heading shows the visible range and total.
+
+## Mouse scrolling does not work
+
+Place the pointer over the Processes or Build Log panel before using the wheel. Processes is available only in the full layout (at least 91 terminal columns × 32 rows). Wheel events over resource metrics, borders, and the footer are ignored. Close help with `?` before scrolling. A process list that already fits its viewport has no additional rows to reveal.
+
+Mouse scrolling requires a terminal or terminal multiplexer that forwards XTerm-compatible mouse reports to the application. Some terminals or modifier keys route the wheel to terminal history instead. Check your terminal or multiplexer mouse settings if events do not reach the application. Keyboard `↑`/`↓` or `j`/`k` remain available for logs; `f` resumes following the latest output. The monitor continues to update resource metrics while you scroll.
+
+## The log divider does not move
+
+Start dragging on the header labeled `BUILD LOG`, using the left mouse button. Dragging from log content or another panel does not resize the log. Close help first, and ensure your terminal forwards button-motion reports. The divider stops at the minimum heights for logs and, in the full layout, processes. Resource and build summaries remain fixed; compact terminals therefore have less resizing space. Release the button before scrolling. Height preferences last for the current session only.
 
 ## Storage does not match the project directory's size
 
@@ -103,7 +113,7 @@ Normal quit, `Ctrl-C`, and supported shutdown signals request terminal restorati
 
 ```sh
 stty sane
-printf '\033[0m\033[?25h\033[?1049l'
+printf '\033[?1000l\033[?1002l\033[?1006l\033[0m\033[?25h\033[?1049l'
 ```
 
 ## Offline build fails

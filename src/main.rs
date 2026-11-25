@@ -1,7 +1,9 @@
+mod input;
 mod monitor;
 mod terminal;
 mod ui;
 
+use input::{Decoder, Event};
 use monitor::{LogTail, Sampler};
 use std::env;
 use std::io::{self, Read, Write};
@@ -25,6 +27,8 @@ Options:
   -V, --version       Show version
 
 Keys: q/Ctrl-C quit, Space pause, Up/Down or j/k scroll, f follow, ? help.
+Mouse: wheel over Processes or Build Log to scroll that panel independently.
+Left-drag the Build Log header to adjust its height.
 Metrics and processes are server-wide. Storage follows the project filesystem.
 The monitor only reads; run lake build separately and capture its output.
 ";
@@ -99,6 +103,11 @@ fn demo_log(log: &mut LogTail, tick: u64) {
     let done = 342 + (tick / 3) % 300;
     log.progress = Some((done, 680));
     if tick == 0 {
+        for index in 320..340 {
+            log.push(format!(
+                "✔ [{index}/680] Built RiemannHypothesis.Lemma{index}"
+            ));
+        }
         log.push("✔ [340/680] Built RiemannHypothesis.ZetaBounds".into());
         log.push("warning: ExplicitFormula.lean:128: unused variable `h`".into());
     }
@@ -178,13 +187,14 @@ fn run(options: Options) -> io::Result<()> {
     });
     let mut previous = None;
     let mut next_tick = Instant::now() + options.interval;
-    let mut escape = 0;
+    let mut decoder = Decoder::default();
     let mut dirty = true;
     loop {
         if terminal::stopping() {
             break;
         }
         let (width, height) = terminal::size();
+        state.clamp_processes(snapshot.processes.len(), (width, height));
         if dirty
             || previous.as_ref().map(|f: &ui::Frame| (f.width, f.height)) != Some((width, height))
         {
@@ -217,33 +227,35 @@ fn run(options: Options) -> io::Result<()> {
             .min(Duration::from_millis(100));
         match receive.recv_timeout(wait) {
             Ok(byte) => {
-                dirty = true;
-                match (escape, byte) {
-                    (_, b'q' | 3 | 4) => break,
-                    (_, 27) => escape = 1,
-                    (1, b'[' | b'O') => escape = 2,
-                    (2, b'A') | (0, b'k') => {
-                        state.scroll(true, 1, &log);
-                        escape = 0;
+                if let Some(event) = decoder.feed(byte) {
+                    dirty = true;
+                    match event {
+                        Event::Key(b'q' | 3 | 4) => break,
+                        Event::Up | Event::Key(b'k') => {
+                            state.scroll(true, 1, &log);
+                        }
+                        Event::Down | Event::Key(b'j') => {
+                            state.scroll(false, 1, &log);
+                        }
+                        Event::Wheel { up, column, row } => {
+                            dirty = state.wheel(up, column, row, (width, height), &snapshot, &log);
+                        }
+                        Event::Mouse { kind, column, row } => {
+                            dirty = state.mouse(kind, column, row, (width, height), &snapshot);
+                        }
+                        Event::Key(b' ') => {
+                            state.paused = !state.paused;
+                        }
+                        Event::Key(b'f') => {
+                            state.follow = true;
+                            state.offset = 0;
+                        }
+                        Event::Key(b'?') => {
+                            state.dragging_log = false;
+                            state.help = !state.help;
+                        }
+                        _ => dirty = false,
                     }
-                    (2, b'B') | (0, b'j') => {
-                        state.scroll(false, 1, &log);
-                        escape = 0;
-                    }
-                    (_, b' ') => {
-                        state.paused = !state.paused;
-                        escape = 0;
-                    }
-                    (_, b'f') => {
-                        state.follow = true;
-                        state.offset = 0;
-                        escape = 0;
-                    }
-                    (_, b'?') => {
-                        state.help = !state.help;
-                        escape = 0;
-                    }
-                    _ => escape = 0,
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -259,6 +271,7 @@ fn run(options: Options) -> io::Result<()> {
                 } else {
                     sampler.sample()
                 };
+                state.clamp_processes(snapshot.processes.len(), (width, height));
                 if options.demo {
                     demo_log(&mut log, state.tick);
                 } else {

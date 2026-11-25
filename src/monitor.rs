@@ -447,6 +447,24 @@ pub fn demo(tick: u64) -> Snapshot {
                 command: "lean RiemannHypothesis/ZetaBounds.lean".into(),
             },
             Process {
+                pid: 28431,
+                name: "lean".into(),
+                rss: 800 * 1024 * 1024,
+                command: "lean RiemannHypothesis/ZeroFreeRegion.lean".into(),
+            },
+            Process {
+                pid: 28441,
+                name: "lean".into(),
+                rss: 600 * 1024 * 1024,
+                command: "lean RiemannHypothesis/CriticalStrip.lean".into(),
+            },
+            Process {
+                pid: 28451,
+                name: "leanc".into(),
+                rss: 96 * 1024 * 1024,
+                command: "leanc .lake/build/ir/RiemannHypothesis/ZetaBounds.c".into(),
+            },
+            Process {
                 pid: 28390,
                 name: "lake".into(),
                 rss: 84 * 1024 * 1024,
