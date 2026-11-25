@@ -389,7 +389,24 @@ pub fn progress(line: &str) -> Option<(u64, u64)> {
         return None;
     }
     let (reported, total): (u64, u64) = (reported.parse().ok()?, total.parse().ok()?);
-    (total > 0 && reported <= total).then_some((reported, total))
+    (reported <= total).then_some((reported, total))
+}
+
+fn successful_jobs(line: &str) -> Option<u64> {
+    let line = line.trim();
+    if line == "Nothing to build." {
+        return Some(0);
+    }
+    let result = line
+        .strip_prefix("Build completed successfully (")?
+        .strip_suffix(").")?;
+    let count = result
+        .strip_suffix(" jobs")
+        .or_else(|| result.strip_suffix(" job"))?;
+    if count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    count.parse().ok()
 }
 
 #[derive(Default)]
@@ -465,6 +482,7 @@ pub struct LogTail {
     pub path: Option<PathBuf>,
     pub lines: VecDeque<String>,
     pub progress: Option<(u64, u64)>,
+    successful_total: Option<u64>,
     pub updated: Option<SystemTime>,
     pub error: Option<String>,
     pub generation: u64,
@@ -475,32 +493,6 @@ pub struct LogTail {
 }
 
 impl LogTail {
-    pub fn replay_file(&self) -> std::io::Result<Option<File>> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let Some(path) = &self.path else {
-            return Ok(None);
-        };
-        #[cfg(target_os = "linux")]
-        const NONBLOCK: i32 = 0x800;
-        #[cfg(not(target_os = "linux"))]
-        const NONBLOCK: i32 = 0x4;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(NONBLOCK)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || self.identity != Some((metadata.dev(), metadata.ino()))
-            || metadata.len() < self.position
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "log changed before replay",
-            ));
-        }
-        Ok(Some(file))
-    }
-
     pub fn history_before(&self, end: Option<u64>) -> std::io::Result<LogHistory> {
         let end = end.unwrap_or(self.position).min(self.position);
         self.history_window(end.saturating_sub(65536), end, true)
@@ -657,6 +649,7 @@ impl LogTail {
             self.lines.clear();
             self.pending.clear();
             self.progress = None;
+            self.successful_total = None;
             self.updated = None;
             self.position = 0;
             self.identity = Some(identity);
@@ -690,6 +683,10 @@ impl LogTail {
                 let line = Self::display_line(&String::from_utf8_lossy(&self.pending));
                 if let Some(value) = progress(&line) {
                     self.progress = Some(value);
+                    self.successful_total = None;
+                } else if let Some(total) = successful_jobs(&line) {
+                    self.progress = Some((total, total));
+                    self.successful_total = Some(total);
                 }
                 if !line.trim().is_empty() {
                     self.push(line);
@@ -723,10 +720,17 @@ impl LogTail {
         self.position
     }
 
-    #[cfg(test)]
     pub fn current_progress(&self) -> Option<(u64, u64)> {
         // A live spinner may not have emitted its trailing CR/newline yet.
         progress(&clean(&String::from_utf8_lossy(&self.pending))).or(self.progress)
+    }
+
+    pub fn successful_total(&self) -> Option<u64> {
+        if progress(&clean(&String::from_utf8_lossy(&self.pending))).is_some() {
+            None
+        } else {
+            self.successful_total
+        }
     }
 
     pub fn visible_lines(&self) -> Vec<String> {

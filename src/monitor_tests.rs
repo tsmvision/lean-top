@@ -665,3 +665,41 @@ fn missing_proc_produces_warnings_without_panicking() {
     assert!(snapshot.processes.is_empty());
     assert!(!snapshot.warnings.is_empty());
 }
+
+#[test]
+fn successful_summary_sets_exact_jobs_and_new_pending_run_clears_success() {
+    for (text, expected) in [
+        ("Build completed successfully (123 jobs).", Some(123)),
+        ("Build completed successfully (1 job).", Some(1)),
+        ("Nothing to build.", Some(0)),
+        ("Build failed (123 jobs).", None),
+        ("warning: Build completed successfully (123 jobs).", None),
+        ("Build completed successfully (-1 jobs).", None),
+        (
+            "Build completed successfully (18446744073709551616 jobs).",
+            None,
+        ),
+    ] {
+        assert_eq!(successful_jobs(text), expected);
+    }
+    let fixture = Fixture::new();
+    let path = fixture.write(
+        "build.log",
+        "✔ [122/123] Built Main\nBuild completed successfully (123 jobs).\n",
+    );
+    let mut log = LogTail::new(Some(path));
+    log.refresh();
+    assert_eq!(log.current_progress(), Some((123, 123)));
+    assert_eq!(log.successful_total(), Some(123));
+    fixture.append("build.log", "⣾ [0/0] Running job computation".as_bytes());
+    log.refresh();
+    assert_eq!(log.current_progress(), Some((0, 0)));
+    assert_eq!(log.successful_total(), None);
+    fixture.append("build.log", b"\r");
+    log.refresh();
+    assert_eq!(log.successful_total(), None);
+    fixture.write("build.log", "Nothing to build.\n");
+    log.refresh();
+    assert_eq!(log.current_progress(), Some((0, 0)));
+    assert_eq!(log.successful_total(), Some(0));
+}

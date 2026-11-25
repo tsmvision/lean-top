@@ -27,7 +27,7 @@ If `lean-top` was installed with Cargo, run `cargo install --path . --force --of
 
 ## The default project or log is not the one expected
 
-Without `--project`, the project is your launch directory (`.`), used for storage and the header. It does not restrict the server-wide process list. Without `--log`, the log is selected independently from `~/logs`, using filename order rather than freshness. For an unambiguous pairing, pass both absolute paths:
+Without `--project`, the project is your launch directory (`.`), used for job-history context, storage, and the header. It does not restrict the server-wide process list. Without `--log`, the log is selected independently from `~/logs`, using filename order rather than freshness. For an unambiguous pairing, pass both absolute paths:
 
 ```sh
 lean-top --project /srv/riemann --log /srv/riemann/build.log
@@ -75,10 +75,9 @@ If `--log` is omitted, the application chooses the filename-sorted first regular
 
 ## Progress is missing, old, or apparently complete
 
-Build shows completed/available module outputs against a total calculated from project `.lean` filenames once at startup. Its numbers are independent of Lake's `[reported/total]` job fraction. No numeric total is hardcoded or supplied manually. For subset targets or custom source layouts, use `--module-list`/`PROJECT/lean-top.modules`.
+Build uses Lake job counts, not source-file counts. The numerator is the latest recognized `[reported/total]` status in the recent selected log tail. The denominator is the larger of the current Lake total and the previous comparable successful build's total. With no history it uses Lake's current total, which can grow during discovery. A success summary sets the exact final `N / N`; `Nothing to build.` sets `0 / 0`.
 
-The calculated/listed total remains fixed during the run. Duplicate completions, native facets, cached/replayed jobs, failed records, and unmatched targets do not add to the numerator. An incomplete inventory or replay reports an error rather than an invented count.
-
+No source or artifact scan delays the counter. If the recent tail contains no recognized status or success summary, the current count is unknown. Capture both output streams and check that `--log` points at the running build. A cached total alone never invents a completed count.
 Progress is read from log text and can outlive the build process. It does not indicate an exit code, successful proof checking, absence of `sorry`, or validity of the Riemann hypothesis proof. Use the build's actual exit status and your Lean verification workflow for those conclusions.
 
 Use a fresh log per build. Ordinary `tee build.log` truncates a shared filename, and truncate-and-regrow between refreshes can evade size-based detection. A timestamped file avoids mixing runs:
@@ -105,9 +104,11 @@ While details are open, arrows and `j`/`k` scroll the dialog instead of logs, an
 
 ## Estimated time is waiting or changes
 
-The monitor first restores completion history in a background worker. It then needs a new unique completion and at least one second of elapsed live observation to measure compilation speed. Re-reading historical output does not manufacture a rate. The total is calculated automatically; inventory errors should be corrected, or a complete target list can be supplied. Without a build log, select the actual log path. Any target-list or replay error appears in the time row.
+The monitor needs at least one second of live observation and a positive change in the Lake-reported job count to measure a rate. It does not treat startup log reading as compiler speed. Without a build log, select the actual log path; without recognized Lake progress, the time row continues to explain what is missing.
 
-Total and remaining time are approximate, based on at most 32 observations of new completed modules. Parallelism and varying module costs can change the forecast. Restarting restores the completion count but restarts speed observations. Only the initial filename inventory is needed; no recurring source/import/artifact scan is performed.
+Total and remaining time are approximate, based on at most 32 distinct job-count observations and the estimated total jobs. Parallelism, differing job costs, and changes to the total can alter the forecast. Restarting recovers progress from the recent log tail and prior successful total from the cache, but resets speed observations. A success summary sets remaining time to zero. There is no source/import/artifact scan or full-log replay.
+
+Cache errors appear in the time row. Current Lake job counts remain usable; fix the cache/configuration problem to reuse successful totals on later runs.
 
 ## Some processes or estimate fields are not visible
 
@@ -180,26 +181,32 @@ Scrolling, terminal resizing, overlays, and automatic pane movement when process
 
 ## Build counts differ after restarting
 
-Startup counts project `.lean` filenames once (or reads a supplied target list), scans ready `.olean`/`.trace` pairs, and restores successful `Built` records from the log's beginning. Reopening the same sources/list and log restores the same ratio, even beyond the 200-record display ring and 64 KiB tail. Large inventories and logs can take time; counts remain unknown until initialization completes.
+Restarting reads the recent 64 KiB log tail rather than starting a new completed-job counter. A recognized Lake status restores its reported numerator immediately; a final success summary restores the exact completed total. If that window has no recognized status, the numerator remains unknown. Select the actual current log and ensure both stdout and stderr are captured. There is no need to restart the build.
 
-Sources added/removed, a changed list, a different log, deleted/truncated records, or multiple builds appended to one file can change the reconstructed count. Native facets, cached/replayed jobs, failed records, and non-target modules are excluded. The automatic denominator describes all project modules; for a partial target, a custom source root, or external dependencies use a verified module list.
+The denominator can exceed the raw Lake total because a previous comparable successful total seeds the estimate. It grows when Lake discovers more jobs than that history predicted, and becomes exact when the current success summary arrives. A prior success outside the tail is not searched automatically. Keep the monitor running through success to save the final total.
 
-## Target inventory or module list is rejected
+## The estimated total is unsuitable for this build
 
-Automatic discovery excludes hidden directories, `lakefile.lean`, symlink directories, and nonregular sources. Unreadable directories or invalid module paths cause an error rather than a truncated count. The supported maximum is 1,000,000 modules and 2,000,000 directory entries, above a 175,187-module project; no value of 175,187 is built into production defaults.
+History is separated by canonical project directory, `--build-key`, and the contents of `lean-toolchain`, `lakefile.lean`, `lakefile.toml`, and `lake-manifest.json`. It cannot automatically distinguish target arguments or cold/warm cache states. Use a consistent label for comparable builds and separate labels for different conditions:
 
-A list contains dotted names such as `Main` or `Proof.Zeta`, one per line. Blank lines and `#` comments are allowed; paths such as `Proof/Zeta.lean` are not module names. Duplicate names count once. Invalid, oversized, or nonregular lists report an error. The list size limit is 64 MiB. After correcting data, restart to initialize the target set again.
+```sh
+lean-top --project /srv/riemann --log /srv/riemann/build.log --build-key Main-cold
+```
+
+The default label is `default`. This option does not change the Lake command. Source changes can also change job totals without changing the history context. The previous total is an economical approximation, not a guaranteed fixed denominator. Failed or partial runs do not overwrite it; the next observed successful summary does.
+
+## Job history cannot be read or saved
+
+History lives under `$XDG_CACHE_HOME/lean-top/jobs`, or `$HOME/.cache/lean-top/jobs` when `XDG_CACHE_HOME` is unset or empty. The base must be absolute and readable/writable by the monitor. The four configuration inputs must be regular, readable files no larger than 1 MiB each when present. History records must have the expected version/context and fit within 512 bytes. Corrupt, nonregular, or oversized files produce diagnostics instead of trusted totals.
+
+Fix the indicated permissions or file problem, then restart the monitor to reload history. Successful summaries save totals atomically with private file permissions. Cache errors do not require rerunning the Lean build and do not prevent displaying current Lake progress. Demo mode does not read or write this history.
 
 ## Build shows zero while log output is visible
 
-Visible Lake job progress does not necessarily include successful `Built` messages. ANSI-mode Lake can omit ordinary successful jobs, and progress is written to stderr. The monitor therefore restores ready `.olean` plus `.trace` pairs as well as successful log records, then watches output changes with Linux inotify. A `.olean` without a trace is not treated as finished. Logs and artifacts for the same module count once. This works with an already running build; do not restart the build just to recover the monitor count.
-
-For a future complete log, capture both streams without forced ANSI formatting:
+The Build numerator now comes directly from the Lake status fraction; it does not depend on individual successful `Built` messages or `.olean`/`.trace` output. A real `[0/0]` discovery record can show zero before Lake reports completed jobs. Ordinary messages without a valid status do not establish a count. Verify the current log path and capture both streams:
 
 ```sh
 lake --no-ansi build Main 2>&1 | tee build.log
 ```
 
-Check the selected source and output roots. The monitor reads literal top-level TOML `srcDir`, `buildDir`, and `leanLibDir`; unsupported dynamic Lean configuration is not evaluated. An unmatched module name appears in the time row as a scope diagnostic. If the log is currently building `Mathlib.*` under `.lake/packages`, project-only progress can legitimately remain zero until the project's own outputs are ready. Those external artifacts are outside the default project output directory.
-
-Existing artifact pairs indicate availability, not validated current source hashes or recompilation during this invocation. Cached/previous outputs may therefore contribute to the baseline. This matches the full fresh-project build premise; use Lake's actual exit status for success and proof verification. Linux watch-limit or queue-overflow errors require attention rather than trusting a silently stale count; non-Linux output scans are limited to once per second.
+If the visible log contains `[16000/20000] Running ...`, the current numerator should be 16000. Rebuild and reinstall the updated monitor if an older executable still shows a source/artifact-based count. Use `command -v lean-top` to identify the executable your shell runs.

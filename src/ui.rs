@@ -1039,7 +1039,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         w - 17,
     );
     let progress_y = b + 2;
-    if let (Some(completed), Some(total)) = (state.estimate.completed, state.estimate.files) {
+    if let (Some(completed), Some(total)) = (state.estimate.completed, state.estimate.total) {
         let label = format!("{completed} / {total}");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
@@ -1069,7 +1069,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             .unwrap_or_else(|| "—".into());
         let total = state
             .estimate
-            .files
+            .total
             .map(|value| value.to_string())
             .unwrap_or_else(|| "—".into());
         frame.text(
@@ -1100,10 +1100,12 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                     "Est. time: no build log (set --log)".into()
                 }
                 _ if state.estimate.completed.is_none() => {
-                    "Est. time: restoring build history".into()
+                    "Est. time: waiting for Lake progress".into()
                 }
-                _ if state.estimate.files.is_none() => "Est. time: restoring target list".into(),
-                _ => "Est. time: waiting for new completions".into(),
+                _ if state.estimate.total.is_none() => {
+                    "Est. time: waiting for Lake progress".into()
+                }
+                _ => "Est. time: waiting for job progress updates".into(),
             }
         };
         frame.text(2, progress_y + 1, &time, Color::Text, inside);
@@ -1518,7 +1520,7 @@ mod tests {
                     height
                 )
                 .plain()
-                .contains("Est. time: restoring build history"));
+                .contains("Est. time: waiting for Lake progress"));
             }
         }
     }
@@ -1541,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn build_ratio_uses_deduplicated_module_count_and_calculated_total() {
+    fn build_ratio_uses_job_estimate_and_retains_numeric_only_format() {
         let snapshot = crate::monitor::demo(0);
         let mut log = LogTail::default();
         log.progress = Some((342, 680));
@@ -1550,7 +1552,7 @@ mod tests {
                 total_seconds: Some(180.0),
                 remaining_seconds: Some(129.0),
                 completed: Some(34),
-                files: Some(120),
+                total: Some(120),
                 error: None,
             },
             ..ViewState::default()
@@ -1609,7 +1611,7 @@ mod tests {
         assert_eq!(
             before.cells[13 * 110..14 * 110],
             after.cells[13 * 110..14 * 110],
-            "The main progress bar must not use Lake's job denominator"
+            "The renderer must use the estimator's selected job total"
         );
     }
 

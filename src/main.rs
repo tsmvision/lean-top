@@ -1,6 +1,6 @@
-mod artifacts;
 mod estimate;
 mod input;
+mod job_history;
 mod monitor;
 mod terminal;
 mod ui;
@@ -22,7 +22,7 @@ Usage: lean-top [OPTIONS]
 Options:
   --project PATH      Project directory (default: current directory)
   --log PATH          Build log (default: first filename-sorted ~/logs/*.log)
-  --module-list PATH  Fixed target modules, one name per line (auto: lean-top.modules)
+  --build-key KEY     Separate job history for a target/cache mode (default: default)
   --interval-ms MS    Refresh interval, 100–60000 ms (default: 500)
   --demo              Show simulated metrics and build output
   --snapshot          Print one plain-text frame and exit (110 x 38)
@@ -35,13 +35,14 @@ Click a process row or press p/Enter for details; Enter/Esc closes details.
 Mouse: wheel over Processes or Build Log to scroll that panel independently.
 Left-drag a section divider to resize the adjacent sections.
 Metrics and processes are server-wide. Storage follows the project filesystem.
-The monitor only reads; run lake build separately and capture its output.
+The monitor reads build output and saves successful job totals in the user cache.
+Run lake build separately and capture its output.
 ";
 
 struct Options {
     project: PathBuf,
     log: Option<PathBuf>,
-    module_list: Option<PathBuf>,
+    build_key: String,
     interval: Duration,
     demo: bool,
     snapshot: bool,
@@ -69,7 +70,7 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
     let mut options = Options {
         project: env::current_dir().map_err(|e| e.to_string())?,
         log: None,
-        module_list: None,
+        build_key: "default".into(),
         interval: Duration::from_millis(500),
         demo: false,
         snapshot: false,
@@ -80,9 +81,12 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
         match arg.as_str() {
             "--project" => options.project = args.next().ok_or("--project requires a path")?.into(),
             "--log" => options.log = Some(args.next().ok_or("--log requires a path")?.into()),
-            "--module-list" => {
-                options.module_list =
-                    Some(args.next().ok_or("--module-list requires a path")?.into())
+            "--build-key" => {
+                let key = args.next().ok_or("--build-key requires a label")?;
+                if key.is_empty() || key.len() > 512 || key.chars().any(char::is_control) {
+                    return Err("--build-key requires a nonempty label of at most 512 bytes without control characters".into());
+                }
+                options.build_key = key;
             }
             "--interval-ms" => {
                 let ms = args
@@ -119,20 +123,6 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
     if options.demo && options.log.is_some() {
         return Err("--demo cannot be combined with --log".into());
     }
-    if options.demo && options.module_list.is_some() {
-        return Err("--demo cannot be combined with --module-list".into());
-    }
-    if !options.demo && options.module_list.is_none() {
-        let manifest = options.project.join("lean-top.modules");
-        if manifest.is_file() {
-            options.module_list = Some(manifest);
-        }
-    }
-    if let Some(manifest) = &options.module_list {
-        if !manifest.is_file() {
-            return Err("--module-list must name an existing regular file".into());
-        }
-    }
     if !options.demo && options.log.is_none() {
         options.log = env::var_os("HOME")
             .filter(|home| !home.is_empty())
@@ -167,19 +157,20 @@ fn demo_log(log: &mut LogTail, tick: u64) {
 }
 
 fn demo_estimate(tick: u64) -> Estimate {
-    let completed = (34 + tick as usize / 6).min(120);
+    let completed = 342 + (tick / 3) % 300;
     Estimate {
-        files: Some(120),
+        total: Some(680),
         completed: Some(completed),
         total_seconds: Some(180.0),
-        remaining_seconds: Some((120 - completed) as f64 * 1.5),
+        remaining_seconds: Some((680 - completed) as f64 / 680.0 * 180.0),
         error: None,
     }
 }
 
 fn run(options: Options) -> io::Result<()> {
     let mut sampler = Sampler::new(options.project.clone());
-    let mut estimator = Estimator::new(options.project.clone(), options.module_list.clone());
+    let mut estimator =
+        (!options.demo).then(|| Estimator::new(&options.project, &options.build_key));
     let mut log = LogTail::new(options.log.clone());
     let mut state = ViewState {
         follow: true,
@@ -207,7 +198,7 @@ fn run(options: Options) -> io::Result<()> {
     state.estimate = if options.demo {
         demo_estimate(0)
     } else {
-        estimator.refresh(&log)
+        estimator.as_mut().unwrap().refresh(&log)
     };
 
     if options.snapshot {
@@ -215,7 +206,7 @@ fn run(options: Options) -> io::Result<()> {
         if !options.demo {
             std::thread::sleep(Duration::from_millis(100));
             snapshot = sampler.sample();
-            state.estimate = estimator.refresh(&log);
+            state.estimate = estimator.as_mut().unwrap().refresh(&log);
         }
         let frame = ui::render(
             &View {
@@ -368,7 +359,7 @@ fn run(options: Options) -> io::Result<()> {
                 state.estimate = if options.demo {
                     demo_estimate(state.tick)
                 } else {
-                    estimator.refresh(&log)
+                    estimator.as_mut().unwrap().refresh(&log)
                 };
                 if let Some((old_lines, old_cursor, old_generation)) = old_log {
                     // Keep the viewed window stable while new lines arrive.
@@ -446,19 +437,14 @@ mod tests {
     }
 
     #[test]
-    fn target_list_options_require_valid_paths_and_reject_demo_inputs() {
-        assert!(options(vec!["--module-list".into()]).is_err());
-        assert!(options(vec![
-            "--module-list".into(),
-            "/nonexistent/lean-top-modules".into()
-        ])
-        .is_err());
-        assert!(options(vec![
-            "--demo".into(),
-            "--module-list".into(),
-            "modules.txt".into()
-        ])
-        .is_err());
+    fn build_history_key_is_explicit_and_validated() {
+        let parsed = options(vec!["--build-key".into(), "Main-cold".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.build_key, "Main-cold");
+        assert!(options(vec!["--build-key".into()]).is_err());
+        assert!(options(vec!["--build-key".into(), "".into()]).is_err());
+        assert!(options(vec!["--build-key".into(), "bad\nkey".into()]).is_err());
     }
 
     #[test]
