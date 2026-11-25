@@ -94,7 +94,7 @@ Pass the printed absolute path to the monitor's `--log` option.
 
 ## Build status shows ACTIVE for a different project
 
-Process discovery is server-wide. Any visible process named `lean`, `lake`, or `leanc` contributes to ACTIVE status, even if it belongs to another project. `--project` selects the storage filesystem and header directory, not a process filter. Processes automatically expands to show all entries that fit while retaining other panes' minimum heights. With many processes or a manually reduced height, hover over Processes and use the wheel for remaining entries. The heading shows the visible range and total.
+Process discovery is server-wide. Any visible process named `lean`, `lake`, or `leanc` contributes to ACTIVE status, even if it belongs to another project. `--project` selects the storage filesystem and header directory, not a process filter. Processes reserves 16 data rows by default and does not grow or shrink when the process count changes. Small terminals may show fewer rows to retain other panes' minimum heights. With many processes or a manually reduced height, hover over Processes and use the wheel for remaining entries. The heading shows the visible range and total.
 
 ## PID, full paths, or command options are missing from Processes
 
@@ -112,7 +112,7 @@ Cache errors appear in the time row. Current Lake job counts remain usable; fix 
 
 ## Some processes or estimate fields are not visible
 
-Automatic process height attempts to show the complete matching list, but it cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the automatic viewport. Restart to restore the default allocation. Build reserves four rows so status, Lake progress, and the estimated total/remaining time remain visible even when crowded or manually shrunk. The Build counter shows only `completed / total`, with no `files`, `fixed`, or `extra` suffix and no duplicate file-summary row. Expanding Build reveals log-source information and latest-event text. The process table remains unavailable in compact mode.
+The default process viewport reserves 16 data rows independently of process count, but cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the default viewport. Restart to restore the default allocation. Build reserves four rows so status, Lake progress, and the estimated total/remaining time remain visible even when crowded or manually shrunk. The Build counter shows only `completed / total`, with no `files`, `fixed`, or `extra` suffix and no duplicate file-summary row. Expanding Build reveals log-source information and latest-event text. The process table remains unavailable in compact mode.
 
 ## Mouse scrolling does not work
 
@@ -177,7 +177,7 @@ For source changes, run `cargo fmt --check`, `cargo test --offline`, and `cargo 
 
 Recognized Lake progress lines normalize the spinner glyph and suppress consecutive identical progress records, including an identical unfinished line. CPU/memory updates alone do not write unchanged log rows. New text updates changed character spans without clearing the row. Distinct progress counters or messages still update the log; repeated ordinary diagnostics are retained.
 
-Scrolling, terminal resizing, overlays, and automatic pane movement when process counts change can redraw affected log content. These are viewport changes. If repeated updates remain at a fixed viewport, check whether the selected log contains genuinely changing counters or text rather than only spinner animation.
+Scrolling, terminal resizing, overlays, and manual divider movement can redraw affected log content. Process-count changes do not move the default panel boundaries. These are viewport changes. If repeated updates remain at a fixed viewport, check whether the selected log contains genuinely changing counters or text rather than only spinner animation.
 
 ## Build counts differ after restarting
 

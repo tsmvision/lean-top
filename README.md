@@ -83,7 +83,7 @@ Automatic discovery runs once at startup. It does not switch to a different file
 
 ## Screen
 
-Abbreviated demo snapshot; all values below are simulated:
+Abbreviated demo view in a tall terminal; all values below are simulated. Blank slots in the default 16-row Processes viewport are omitted:
 
 ```text
 LEAN TOP              Lean build monitor                     ● DEMO  0.5s
@@ -182,7 +182,7 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **CPU** is aggregate server utilization calculated from consecutive `/proc/stat` samples, on a 0–100% scale. The first sample has no rate yet. Load averages cover 1, 5, and 15 minutes.
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
-- **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. By default the pane grows to show all entries that fit, reducing optional summary space if necessary while preserving the log minimum. Excess entries remain scrollable when terminal space runs out. Dragging a divider sets a manual height for the session. The heading shows the visible range and total. Processes are live and not filtered by project.
+- **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. By default the pane reserves 16 process data rows, independent of the current process count. It keeps that height until a divider is dragged; smaller terminals clamp the height to preserve other panes' minimums. Additional entries remain scrollable. Dragging a divider sets a manual height for the session. The heading shows the visible range and total. Processes are live and not filtered by project.
 - **ACTIVE/IDLE** reflects whether any of those processes were detected. **Build** displays Lake-reported completed jobs divided by the estimated total jobs. Jobs can include native and cache work; they are not a count of Lean source files.
 
 **Current progress:** the numerator comes directly from the latest recognized Lake `[reported/total]` record in the selected log, including an unfinished progress line. It is not counted from individual `Built` messages and is not reset to one when the monitor restarts. Restarting reads the recent log tail immediately, without scanning source files, artifacts, or the entire log. If no recognized progress is available in that tail, the current count remains unknown rather than becoming zero.

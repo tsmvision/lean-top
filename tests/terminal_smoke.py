@@ -115,6 +115,15 @@ def exercise(binary, quit_key=None):
         assert b"TYPE     MEMORY       TARGET" in captured
         assert "▆".encode() not in captured, "CPU history graph was removed"
 
+        # Default: reserve sixteen data rows even with only six processes.
+        rows = screen_text(captured).splitlines()
+        assert "PROCESSES" in rows[13] and "BUILD LOG" in rows[32]
+        # Manually restore the former split for the existing coordinate checks.
+        for press, target in [(33,28), (14,19), (10,12)]:
+            event_output(f"\x1b[<0;10;{press}M".encode())
+            event_output(f"\x1b[<32;10;{target}M".encode())
+            event_output(f"\x1b[<0;10;{target}m".encode())
+
         # Details expose full paths and PID without crowding normal rows.
         output = event_output(b"\x1b[<0;10;21M",b"PROCESS DETAILS")
         assert b"28416" in output and b"TARGET PATH" in output and b"COMMAND" in output
@@ -127,7 +136,7 @@ def exercise(binary, quit_key=None):
         event_output(b"\x1b[<0;10;22m")
         event_output(b"\x1b[<0;2;2M")
 
-        # Explicitly shrink the auto-sized process panel to exercise scrolling.
+        # Explicitly shrink the manually sized process panel to exercise scrolling.
         event_output(b"\x1b[<0;10;28M")
         event_output(b"\x1b[<32;10;25M",b"1-3 / 6")
         event_output(b"\x1b[<0;10;25m")
@@ -238,7 +247,7 @@ def main():
     plain = subprocess.check_output([binary, "--demo", "--snapshot"])
     assert b"\x1b" not in plain
     assert b"342 / 680" in plain
-    assert b"Latest:" in plain
+    assert b"PROCESSES" in plain
     assert b"Initial Lean files" not in plain and b"Est. time" in plain
     bad = subprocess.run([binary, "--interval-ms", "99"], capture_output=True)
     assert bad.returncode != 0
@@ -281,7 +290,7 @@ def main():
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, Lake job counts, successful-total history, and restart recovery, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, fixed default process height, wrapped logs, file-backed scrollback, Lake job counts, successful-total history, and restart recovery, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
 
 
 def exercise_wrapping(binary):

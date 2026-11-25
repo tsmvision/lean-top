@@ -18,7 +18,7 @@ impl Layout {
         width: usize,
         height: usize,
         requested: Option<[usize; 3]>,
-        process_count: usize,
+        _process_count: usize,
     ) -> Self {
         if width < 52 || height < 20 {
             return Self {
@@ -31,13 +31,9 @@ impl Layout {
         let full = width >= 90 && height >= 32;
         let automatic = requested.is_none();
         let minimum = [3, 4, if full { 3 } else { 0 }];
-        let mut requested = requested.unwrap_or(if full {
-            [7, 7, process_count.saturating_add(3).max(3)]
-        } else {
-            [3, 6, 0]
-        });
+        let mut requested = requested.unwrap_or(if full { [7, 7, 16 + 3] } else { [3, 6, 0] });
         if full && automatic {
-            // Fit the automatically sized process list before optional summary
+            // Reserve sixteen process rows before optional summary
             // space; preserve the minimum fields in the resource/build panes.
             let mut excess = requested
                 .iter()
@@ -1217,7 +1213,10 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     if messages.is_empty() && lines.is_empty() {
         messages.push("Waiting for build output… Start lake build in another terminal.".into());
     }
-    let warning_rows = messages.len().min(available);
+    // Preserve one output row when a small log pane also contains warnings.
+    let warning_rows = messages
+        .len()
+        .min(available.saturating_sub(usize::from(!lines.is_empty())));
     for (index, message) in messages.iter().take(warning_rows).enumerate() {
         frame.text(2, log_y + 1 + index, message, Color::Yellow, inside);
     }
@@ -1526,20 +1525,27 @@ mod tests {
     }
 
     #[test]
-    fn default_process_pane_shows_all_rows_when_space_allows_and_keeps_log_minimum() {
-        let snapshot = crate::monitor::demo(0);
-        let layout = Layout::new(110, 38, None, snapshot.processes.len());
-        assert_eq!(layout.process_rows(), snapshot.processes.len());
-        assert_eq!(Layout::new(110, 38, None, 15).process_rows(), 15);
-        assert_eq!(
-            layout.process_window(snapshot.processes.len(), 0),
-            0..snapshot.processes.len()
-        );
-        let crowded = Layout::new(110, 38, None, 200);
-        assert!(crowded.process_rows() < 200);
-        assert!(crowded.log.as_ref().unwrap().len() >= 4);
-        let manual = Layout::new(110, 38, Some([7, 7, 4]), 6);
-        assert_eq!(manual.process_rows(), 1);
+    fn default_process_pane_reserves_sixteen_rows_independent_of_process_count() {
+        for height in [38, 48, 80] {
+            let baseline = Layout::new(110, height, None, 0);
+            assert_eq!(baseline.process_rows(), 16);
+            for count in [1, 6, 15, 16, 17, 200] {
+                let layout = Layout::new(110, height, None, count);
+                assert_eq!(layout.processes, baseline.processes);
+                assert_eq!(layout.log, baseline.log);
+                assert_eq!(layout.process_rows(), 16);
+                assert!(layout.log.as_ref().unwrap().len() >= 4);
+            }
+        }
+        let small = Layout::new(110, 32, None, 200);
+        assert!(small.process_rows() < 16);
+        assert!(small.log.as_ref().unwrap().len() >= 4);
+        for count in [0, 6, 200] {
+            assert_eq!(
+                Layout::new(110, 38, Some([7, 7, 4]), count).process_rows(),
+                1
+            );
+        }
     }
 
     #[test]
@@ -1640,7 +1646,12 @@ mod tests {
         assert!(!text.contains("/opt/lean files/"));
         assert!(!text.contains("28416"));
         assert!(!text.chars().any(|c| ('▁'..='█').contains(&c) && c != '█'));
-        assert!(state.mouse(MouseKind::Press, 9, 20, (110, 38), &snapshot));
+        let first_row = Layout::new(110, 38, state.pane_heights, snapshot.processes.len())
+            .processes
+            .unwrap()
+            .start
+            + 2;
+        assert!(state.mouse(MouseKind::Press, 9, first_row, (110, 38), &snapshot));
         assert_eq!(state.process_detail.as_ref().unwrap().pid, 28416);
         let details = render(
             &View {
@@ -1674,7 +1685,12 @@ mod tests {
             follow: false,
             ..ViewState::default()
         };
-        assert!(state.mouse(MouseKind::Press, 9, 20, (110, 38), &snapshot));
+        let first_row = Layout::new(110, 38, state.pane_heights, snapshot.processes.len())
+            .processes
+            .unwrap()
+            .start
+            + 2;
+        assert!(state.mouse(MouseKind::Press, 9, first_row, (110, 38), &snapshot));
         assert_eq!(state.process_detail.as_ref().unwrap().pid, 28421);
         snapshot.processes.swap(0, 1);
         assert!(state.wheel(false, 10, 20, (110, 38), &snapshot, &log));
@@ -1858,7 +1874,11 @@ mod tests {
     fn switching_layout_modes_cancels_an_in_progress_drag() {
         let snapshot = crate::monitor::demo(0);
         let mut state = ViewState::default();
-        state.mouse(MouseKind::Press, 9, 18, (110, 38), &snapshot);
+        let divider = Layout::new(110, 38, None, snapshot.processes.len())
+            .processes
+            .unwrap()
+            .start;
+        state.mouse(MouseKind::Press, 9, divider, (110, 38), &snapshot);
         assert!(state.dragging_divider.is_some());
         state.mouse(MouseKind::Drag, 9, 16, (79, 24), &snapshot);
         assert!(state.dragging_divider.is_none());
