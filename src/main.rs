@@ -1,13 +1,15 @@
+mod estimate;
 mod input;
 mod monitor;
 mod terminal;
 mod ui;
 
+use estimate::{Estimate, Estimator};
 use input::{Decoder, Event};
 use monitor::{LogTail, Sampler};
 use std::env;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use ui::{View, ViewState};
@@ -18,7 +20,7 @@ Usage: lean-top [OPTIONS]
 
 Options:
   --project PATH      Project directory (default: current directory)
-  --log PATH          Existing or future build log to follow
+  --log PATH          Build log (default: first filename-sorted ~/logs/*.log)
   --interval-ms MS    Refresh interval, 100–60000 ms (default: 500)
   --demo              Show simulated metrics and build output
   --snapshot          Print one plain-text frame and exit (110 x 38)
@@ -27,6 +29,7 @@ Options:
   -V, --version       Show version
 
 Keys: q/Ctrl-C quit, Space pause, Up/Down or j/k scroll, f follow, ? help.
+Click a process row or press p/Enter for details; Enter/Esc closes details.
 Mouse: wheel over Processes or Build Log to scroll that panel independently.
 Left-drag a section divider to resize the adjacent sections.
 Metrics and processes are server-wide. Storage follows the project filesystem.
@@ -40,6 +43,23 @@ struct Options {
     demo: bool,
     snapshot: bool,
     color: bool,
+}
+
+fn discover_log(directory: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|extension| extension == "log")
+                && !path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .starts_with('.')
+                && path.is_file()
+        })
+        .min()
 }
 
 fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -91,6 +111,11 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
     if options.demo && options.log.is_some() {
         return Err("--demo cannot be combined with --log".into());
     }
+    if !options.demo && options.log.is_none() {
+        options.log = env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .and_then(|home| discover_log(&PathBuf::from(home).join("logs")));
+    }
     if let Some(path) = &options.log {
         if path.is_dir() {
             return Err("--log must be a file path".into());
@@ -119,8 +144,20 @@ fn demo_log(log: &mut LogTail, tick: u64) {
     }
 }
 
+fn demo_estimate(tick: u64) -> Estimate {
+    let completed = (34 + tick as usize / 6).min(120);
+    Estimate {
+        files: Some(120),
+        completed,
+        total_seconds: Some(180.0),
+        remaining_seconds: Some((120 - completed) as f64 * 1.5),
+        scope: "demo estimate".into(),
+    }
+}
+
 fn run(options: Options) -> io::Result<()> {
     let mut sampler = Sampler::new(options.project.clone());
+    let mut estimator = (!options.demo).then(|| Estimator::new(options.project.clone()));
     let mut log = LogTail::new(options.log.clone());
     let mut state = ViewState {
         follow: true,
@@ -145,13 +182,18 @@ fn run(options: Options) -> io::Result<()> {
     } else {
         log.refresh();
     }
-    state.push_cpu(snapshot.cpu);
+    state.estimate = if options.demo {
+        demo_estimate(0)
+    } else {
+        estimator.as_mut().unwrap().refresh(&log, &snapshot)
+    };
 
     if options.snapshot {
         // A second small sample gives a meaningful CPU delta for a live snapshot.
         if !options.demo {
             std::thread::sleep(Duration::from_millis(100));
             snapshot = sampler.sample();
+            state.estimate = estimator.as_mut().unwrap().refresh(&log, &snapshot);
         }
         let frame = ui::render(
             &View {
@@ -231,11 +273,26 @@ fn run(options: Options) -> io::Result<()> {
                     dirty = true;
                     match event {
                         Event::Key(b'q' | 3 | 4) => break,
-                        Event::Up | Event::Key(b'k') => {
-                            state.scroll(true, 1, &log);
+                        Event::Up | Event::Key(b'k') if !state.help => {
+                            if state.process_detail.is_some() {
+                                state.scroll_detail(true, 1, (width, height), &snapshot);
+                            } else {
+                                state.scroll(true, 1, &log, width);
+                            }
                         }
-                        Event::Down | Event::Key(b'j') => {
-                            state.scroll(false, 1, &log);
+                        Event::Down | Event::Key(b'j') if !state.help => {
+                            if state.process_detail.is_some() {
+                                state.scroll_detail(false, 1, (width, height), &snapshot);
+                            } else {
+                                state.scroll(false, 1, &log, width);
+                            }
+                        }
+                        Event::Key(b'p' | b'\r' | b'\n') if !state.help => {
+                            if state.process_detail.is_some() {
+                                state.close_detail();
+                            } else {
+                                dirty = state.open_process(&snapshot, (width, height));
+                            }
                         }
                         Event::Wheel { up, column, row } => {
                             dirty = state.wheel(up, column, row, (width, height), &snapshot, &log);
@@ -246,7 +303,7 @@ fn run(options: Options) -> io::Result<()> {
                         Event::Key(b' ') => {
                             state.paused = !state.paused;
                         }
-                        Event::Key(b'f') => {
+                        Event::Key(b'f') if !state.help && state.process_detail.is_none() => {
                             state.follow = true;
                             state.offset = 0;
                         }
@@ -259,13 +316,22 @@ fn run(options: Options) -> io::Result<()> {
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if (state.process_detail.is_some() || state.help) && decoder.take_escape() {
+                    if state.help {
+                        state.help = false;
+                    } else {
+                        state.close_detail();
+                    }
+                    dirty = true;
+                }
+            }
         }
         if Instant::now() >= next_tick {
             if !state.paused {
                 state.tick += 1;
-                let old_cursor = log.cursor();
-                let old_generation = log.generation;
+                let old_log =
+                    (!state.follow).then(|| (log.visible_lines(), log.cursor(), log.generation));
                 snapshot = if options.demo {
                     monitor::demo(state.tick)
                 } else {
@@ -277,19 +343,29 @@ fn run(options: Options) -> io::Result<()> {
                 } else {
                     log.refresh();
                 }
-                if !state.follow {
+                state.estimate = if options.demo {
+                    demo_estimate(state.tick)
+                } else {
+                    estimator.as_mut().unwrap().refresh(&log, &snapshot)
+                };
+                if let Some((old_lines, old_cursor, old_generation)) = old_log {
                     // Keep the viewed window stable while new lines arrive.
-                    let new_len = log.visible_lines().len();
+                    let new_lines = log.visible_lines();
                     state.offset = if log.generation != old_generation {
                         0
                     } else {
                         state
                             .offset
-                            .saturating_add(log.cursor().saturating_sub(old_cursor) as usize)
-                            .min(new_len.saturating_sub(1))
+                            .saturating_add(ui::appended_log_rows(
+                                &old_lines,
+                                old_cursor,
+                                &new_lines,
+                                log.cursor(),
+                                width,
+                            ))
+                            .min(ui::log_row_count(&new_lines, width).saturating_sub(1))
                     };
                 }
-                state.push_cpu(snapshot.cpu);
                 dirty = true;
             }
             next_tick = Instant::now() + options.interval;
@@ -312,6 +388,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_log_discovery_is_deterministic_and_ignores_non_files() {
+        let directory = env::temp_dir().join(format!(
+            "lean-top-log-default-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(discover_log(&directory), None);
+        for name in ["z.log", "a.log", "a.txt", ".hidden.log"] {
+            std::fs::write(directory.join(name), "").unwrap();
+        }
+        std::fs::create_dir(directory.join("0.log")).unwrap();
+        assert_eq!(discover_log(&directory), Some(directory.join("a.log")));
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(discover_log(&directory), None);
+    }
 
     #[test]
     fn default_is_realtime_and_invalid_intervals_are_rejected() {

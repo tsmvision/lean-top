@@ -1,8 +1,9 @@
+use crate::estimate::Estimate;
 use crate::input::MouseKind;
-use crate::monitor::{clean, progress, LogTail, Snapshot};
-use std::collections::VecDeque;
+use crate::monitor::{clean, progress, LogTail, Process, Snapshot};
 use std::fmt::Write;
 use std::ops::Range;
+use std::path::Path;
 
 /// The renderer and mouse hit testing share the exact same panel boundaries.
 struct Layout {
@@ -13,7 +14,12 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(width: usize, height: usize, requested: Option<[usize; 3]>) -> Self {
+    fn new(
+        width: usize,
+        height: usize,
+        requested: Option<[usize; 3]>,
+        process_count: usize,
+    ) -> Self {
         if width < 52 || height < 20 {
             return Self {
                 resources: 0..0,
@@ -23,8 +29,26 @@ impl Layout {
             };
         }
         let full = width >= 90 && height >= 32;
+        let automatic = requested.is_none();
         let minimum = [3, 3, if full { 3 } else { 0 }];
-        let requested = requested.unwrap_or(if full { [7, 7, 6] } else { [3, 6, 0] });
+        let mut requested = requested.unwrap_or(if full {
+            [7, 7, process_count.saturating_add(3).max(3)]
+        } else {
+            [3, 6, 0]
+        });
+        if full && automatic {
+            // Fit the automatically sized process list before optional summary
+            // space; preserve the minimum fields in the resource/build panes.
+            let mut excess = requested
+                .iter()
+                .fold(0usize, |sum, value| sum.saturating_add(*value))
+                .saturating_sub(height - 10);
+            for index in [1, 0] {
+                let shrink = requested[index].saturating_sub(3).min(excess);
+                requested[index] -= shrink;
+                excess -= shrink;
+            }
+        }
         let mut heights = minimum;
         // Reserve the fixed header/footer and at least three log content rows.
         // Allocate from the top so preferences also fit smaller terminals.
@@ -75,6 +99,148 @@ impl Layout {
             self.adjacent(*index)
                 .is_some_and(|(_, lower)| lower.start == row)
         })
+    }
+
+    fn process_window(&self, count: usize, offset: usize) -> Range<usize> {
+        let start = offset.min(count.saturating_sub(self.process_rows()));
+        start..(start + self.process_rows()).min(count)
+    }
+}
+
+struct Dialog {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl Dialog {
+    fn new(width: usize, height: usize) -> Self {
+        let dialog_width = width.saturating_sub(8).min(100);
+        let dialog_height = height.saturating_sub(6).min(18);
+        Self {
+            x: (width - dialog_width) / 2,
+            y: (height - dialog_height) / 2,
+            width: dialog_width,
+            height: dialog_height,
+        }
+    }
+
+    fn contains(&self, column: usize, row: usize) -> bool {
+        (self.x..self.x + self.width).contains(&column)
+            && (self.y..self.y + self.height).contains(&row)
+    }
+}
+
+fn target_name(process: &Process) -> &str {
+    process
+        .target
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("—")
+}
+
+fn detail_lines(process: &Process, live: bool, width: usize) -> Vec<String> {
+    let fields = [
+        format!("PID     {}", process.pid),
+        format!("TYPE    {}", process.name),
+        format!("MEMORY  {}", bytes(process.rss)),
+        format!(
+            "STATE   {}",
+            if live {
+                "Visible in latest sample"
+            } else {
+                "No longer visible; last captured details"
+            }
+        ),
+        String::new(),
+        "TARGET PATH".into(),
+        process
+            .target
+            .clone()
+            .unwrap_or_else(|| "Unavailable".into()),
+        String::new(),
+        "COMMAND".into(),
+        if process.command.is_empty() {
+            "Unavailable".into()
+        } else {
+            process.command.clone()
+        },
+    ];
+    fields
+        .iter()
+        .flat_map(|field| wrap_text(field, width))
+        .collect()
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+    for ch in clean(text).chars() {
+        let size = char_width(ch);
+        if size == 0 {
+            continue;
+        }
+        if used + size > width.max(2) {
+            rows.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        line.push(ch);
+        used += size;
+    }
+    rows.push(line);
+    rows
+}
+
+pub fn log_row_count(lines: &[String], terminal_width: usize) -> usize {
+    let width = terminal_width.saturating_sub(4).max(2);
+    lines
+        .iter()
+        .map(|line| {
+            let (mut count, mut used) = (1, 0);
+            for ch in clean(line).chars() {
+                let size = char_width(ch);
+                if used + size > width {
+                    count += 1;
+                    used = 0;
+                }
+                used += size;
+            }
+            count
+        })
+        .sum()
+}
+
+pub fn appended_log_rows(
+    before: &[String],
+    before_cursor: u64,
+    after: &[String],
+    after_cursor: u64,
+    width: usize,
+) -> usize {
+    let added = usize::try_from(after_cursor.saturating_sub(before_cursor)).unwrap_or(usize::MAX);
+    let removed = before
+        .len()
+        .saturating_add(added)
+        .saturating_sub(after.len())
+        .min(before.len());
+    log_row_count(after, width)
+        .saturating_add(log_row_count(&before[..removed], width))
+        .saturating_sub(log_row_count(before, width))
+}
+
+fn log_color(line: &str) -> Color {
+    let lower = line.to_lowercase();
+    if lower.contains("error:") || lower.contains("failed") || line.contains('✖') {
+        Color::Red
+    } else if lower.contains("warning:") || line.contains('⚠') {
+        Color::Yellow
+    } else if line.contains("Built ") || line.contains('✔') {
+        Color::Green
+    } else {
+        Color::Text
     }
 }
 
@@ -297,6 +463,17 @@ pub fn bytes(value: u64) -> String {
     }
 }
 
+fn duration(seconds: f64) -> String {
+    let seconds = seconds.max(0.0).ceil() as u64;
+    if seconds >= 3600 {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn ratio(value: Option<(u64, u64)>) -> f64 {
     value
         .filter(|(_, total)| *total > 0)
@@ -328,25 +505,71 @@ pub struct ViewState {
     pub process_offset: usize,
     pub pane_heights: Option<[usize; 3]>,
     pub dragging_divider: Option<(usize, bool)>,
+    pub process_detail: Option<Process>,
+    pub detail_offset: usize,
+    pub estimate: Estimate,
     pub help: bool,
-    pub history: VecDeque<f64>,
     pub demo: bool,
     pub tick: u64,
 }
 
 impl ViewState {
-    pub fn push_cpu(&mut self, value: Option<f64>) {
-        if let Some(value) = value {
-            if self.history.len() >= 32 {
-                self.history.pop_front();
-            }
-            self.history.push_back(value);
+    pub fn close_detail(&mut self) {
+        self.process_detail = None;
+        self.detail_offset = 0;
+    }
+
+    pub fn open_process(&mut self, snapshot: &Snapshot, size: (usize, usize)) -> bool {
+        if self.help {
+            return false;
+        }
+        let layout = Layout::new(size.0, size.1, self.pane_heights, snapshot.processes.len());
+        if layout.processes.is_none() {
+            return false;
+        }
+        let window = layout.process_window(snapshot.processes.len(), self.process_offset);
+        if let Some(process) = snapshot.processes.get(window.start) {
+            self.process_detail = Some(process.clone());
+            self.detail_offset = 0;
+            self.dragging_divider = None;
+            true
+        } else {
+            false
         }
     }
 
-    pub fn scroll(&mut self, up: bool, count: usize, log: &LogTail) {
+    pub fn scroll_detail(
+        &mut self,
+        up: bool,
+        count: usize,
+        size: (usize, usize),
+        snapshot: &Snapshot,
+    ) -> bool {
+        let Some(selected) = &self.process_detail else {
+            return false;
+        };
+        let current = snapshot.processes.iter().find(|p| p.pid == selected.pid);
+        let dialog = Dialog::new(size.0, size.1);
+        let rows = dialog.height.saturating_sub(4);
+        let lines = detail_lines(
+            current.unwrap_or(selected),
+            current.is_some(),
+            dialog.width.saturating_sub(4),
+        );
+        let maximum = lines.len().saturating_sub(rows);
+        let previous = self.detail_offset;
+        self.detail_offset = self.detail_offset.min(maximum);
+        self.detail_offset = if up {
+            self.detail_offset.saturating_sub(count)
+        } else {
+            self.detail_offset.saturating_add(count).min(maximum)
+        };
+        previous != self.detail_offset
+    }
+
+    pub fn scroll(&mut self, up: bool, count: usize, log: &LogTail, width: usize) {
         self.follow = false;
-        let max = log.visible_lines().len().saturating_sub(1);
+        let max = log_row_count(&log.visible_lines(), width).saturating_sub(1);
         self.offset = if up {
             self.offset.saturating_add(count).min(max)
         } else {
@@ -355,7 +578,7 @@ impl ViewState {
     }
 
     pub fn clamp_processes(&mut self, count: usize, size: (usize, usize)) {
-        let rows = Layout::new(size.0, size.1, self.pane_heights).process_rows();
+        let rows = Layout::new(size.0, size.1, self.pane_heights, count).process_rows();
         self.process_offset = self.process_offset.min(count.saturating_sub(rows.max(1)));
     }
 
@@ -368,12 +591,33 @@ impl ViewState {
         snapshot: &Snapshot,
     ) -> bool {
         let (width, height) = size;
-        let layout = Layout::new(width, height, self.pane_heights);
+        let layout = Layout::new(width, height, self.pane_heights, snapshot.processes.len());
         if self.help || layout.log.is_none() {
             return self.dragging_divider.take().is_some();
         }
+        if self.process_detail.is_some() {
+            if kind == MouseKind::Press && !Dialog::new(width, height).contains(column, row) {
+                self.close_detail();
+                return true;
+            }
+            return false;
+        }
         match kind {
             MouseKind::Press => {
+                if column > 0 && column < width - 1 {
+                    if let Some(region) = &layout.processes {
+                        let window =
+                            layout.process_window(snapshot.processes.len(), self.process_offset);
+                        let first_row = region.start + 2;
+                        if (first_row..first_row + window.len()).contains(&row) {
+                            self.process_detail =
+                                Some(snapshot.processes[window.start + row - first_row].clone());
+                            self.detail_offset = 0;
+                            self.dragging_divider = None;
+                            return true;
+                        }
+                    }
+                }
                 let active = if column > 0 && column < width - 1 {
                     layout
                         .divider_at(row)
@@ -437,7 +681,11 @@ impl ViewState {
         {
             return false;
         }
-        let layout = Layout::new(width, height, self.pane_heights);
+        if self.process_detail.is_some() {
+            return Dialog::new(width, height).contains(column, row)
+                && self.scroll_detail(up, 3, size, snapshot);
+        }
+        let layout = Layout::new(width, height, self.pane_heights, snapshot.processes.len());
         if layout
             .processes
             .as_ref()
@@ -462,7 +710,7 @@ impl ViewState {
             .is_some_and(|range| range.contains(&row))
         {
             let previous = (self.follow, self.offset);
-            self.scroll(up, 3, log);
+            self.scroll(up, 3, log, width);
             previous != (self.follow, self.offset)
         } else {
             false
@@ -482,7 +730,12 @@ pub struct View<'a> {
 
 pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     let mut frame = Frame::new(width, height);
-    let layout = Layout::new(width, height, view.state.pane_heights);
+    let layout = Layout::new(
+        width,
+        height,
+        view.state.pane_heights,
+        view.snapshot.processes.len(),
+    );
     if layout.log.is_none() {
         frame.text(1, 1, "LEAN TOP", Color::Cyan, width.saturating_sub(2));
         frame.text(
@@ -570,24 +823,10 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                 pressure(percentages[index]),
             );
         }
-        let symbols: Vec<_> = "▁▂▃▄▅▆▇█".chars().collect();
-        let spark: String = state
-            .history
-            .iter()
-            .rev()
-            .take(col - 3)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|p| symbols[((p.clamp(0.0, 100.0) / 100.0 * 7.0).round() as usize).min(7)])
-            .collect();
         if resource_y + 3 < layout.resources.end {
-            frame.text(2, resource_y + 3, &spark, Color::Cyan, col - 2);
-        }
-        if resource_y + 4 < layout.resources.end {
             frame.text(
                 2,
-                resource_y + 4,
+                resource_y + 3,
                 &format!("Load {}", s.load),
                 Color::Muted,
                 col - 2,
@@ -682,6 +921,30 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         w - 17,
     );
     let progress_y = b + 2 + usize::from(layout.build.len() >= 6);
+    if layout.build.len() >= 6 {
+        let files = state
+            .estimate
+            .files
+            .map(|total| {
+                let scope = if inside >= 85 && !state.estimate.scope.is_empty() {
+                    format!(" · {}", state.estimate.scope)
+                } else {
+                    " · approx.".into()
+                };
+                format!(
+                    "Est. Lean files ≈ {total} · done {}{scope}",
+                    state.estimate.completed
+                )
+            })
+            .unwrap_or_else(|| {
+                if state.estimate.scope.to_lowercase().contains("scann") {
+                    "Est. Lean files: scanning sources…".into()
+                } else {
+                    "Est. Lean files: unavailable".into()
+                }
+            });
+        frame.text(2, b + 2, &files, Color::Muted, inside);
+    }
     if let Some((reported, total)) = log.current_progress() {
         let label = format!("{reported} / {total} jobs");
         let bar_width = inside.saturating_sub(label.len() + 3);
@@ -712,16 +975,25 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     let lines = log.visible_lines();
     let latest = lines.iter().rev().find(|line| progress(line).is_some());
     if progress_y + 1 < layout.build.end {
-        frame.text(
-            2,
-            progress_y + 1,
-            &format!(
-                "Latest event   {}",
-                latest.map(|s| s.as_str()).unwrap_or("—")
+        let time = match (
+            state.estimate.total_seconds,
+            state.estimate.remaining_seconds,
+        ) {
+            (Some(total), Some(left)) => format!(
+                "Est. time ≈ {} total · ≈ {} left",
+                duration(total),
+                duration(left)
             ),
-            Color::Text,
-            inside,
-        );
+            (_, Some(left)) => format!("Est. time ≈ {} remaining", duration(left)),
+            _ if state.estimate.files.is_none()
+                && state.estimate.scope.to_lowercase().contains("scann") =>
+            {
+                "Est. time: waiting for source analysis…".into()
+            }
+            _ if state.estimate.files.is_none() => "Est. time: unavailable".into(),
+            _ => "Est. time: learning from completed modules…".into(),
+        };
+        frame.text(2, progress_y + 1, &time, Color::Text, inside);
     }
     let source = log
         .path
@@ -756,12 +1028,22 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             inside,
         );
     }
+    if progress_y + 3 < layout.build.end {
+        frame.text(
+            2,
+            progress_y + 3,
+            &format!(
+                "Latest event   {}",
+                latest.map(|s| s.as_str()).unwrap_or("—")
+            ),
+            Color::Muted,
+            inside,
+        );
+    }
     let log_y = layout.log.as_ref().unwrap().start;
     if let Some(process_region) = &layout.processes {
-        let start = state
-            .process_offset
-            .min(s.processes.len().saturating_sub(layout.process_rows()));
-        let end = (start + layout.process_rows()).min(s.processes.len());
+        let window = layout.process_window(s.processes.len(), state.process_offset);
+        let (start, end) = (window.start, window.end);
         let range = if s.processes.is_empty() {
             "0 / 0".into()
         } else {
@@ -771,17 +1053,16 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         frame.text(
             2,
             process_region.start + 1,
-            "PID      NAME      MEMORY       COMMAND",
+            "TYPE     MEMORY       TARGET",
             Color::Muted,
             inside,
         );
         for (index, process) in s.processes[start..end].iter().enumerate() {
             let row = format!(
-                "{:<8} {:<9} {:<12} {}",
-                process.pid,
+                "{:<8} {:<12} {}",
                 process.name,
                 bytes(process.rss),
-                process.command
+                target_name(process)
             );
             frame.text(
                 2,
@@ -816,27 +1097,25 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         frame.text(2, log_y + 1 + index, message, Color::Yellow, inside);
     }
     let log_rows = available - warning_rows;
+    let wrapped: Vec<_> = lines
+        .iter()
+        .flat_map(|line| {
+            let color = log_color(line);
+            wrap_text(line, inside)
+                .into_iter()
+                .map(move |text| (text, color))
+        })
+        .collect();
     let end = if state.follow {
-        lines.len()
+        wrapped.len()
     } else {
-        lines
+        wrapped
             .len()
-            .saturating_sub(state.offset.min(lines.len().saturating_sub(1)))
+            .saturating_sub(state.offset.min(wrapped.len().saturating_sub(1)))
     };
     let start = end.saturating_sub(log_rows);
-    for (index, line) in lines[start..end].iter().enumerate() {
-        let lower = line.to_lowercase();
-        let color = if lower.contains("error:") || lower.contains("failed") || line.contains('✖')
-        {
-            Color::Red
-        } else if lower.contains("warning:") || line.contains('⚠') {
-            Color::Yellow
-        } else if line.contains("Built ") || line.contains('✔') {
-            Color::Green
-        } else {
-            Color::Text
-        };
-        frame.text(2, log_y + 1 + warning_rows + index, line, color, inside);
+    for (index, (line, color)) in wrapped[start..end].iter().enumerate() {
+        frame.text(2, log_y + 1 + warning_rows + index, line, *color, inside);
     }
     frame.text(
         0,
@@ -850,17 +1129,23 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         h - 1,
         if w < 60 {
             "q Quit  Space Pause  ↑↓/jk Logs  f Follow  ? Help"
+        } else if full {
+            "q Quit  Space Pause  Wheel Scroll  Click/p Details  ↑↓ Logs  f Follow  ? Help"
         } else {
             "q Quit   Space Pause   Wheel Scroll   ↑↓/jk Logs   f Follow   ? Help"
         },
         Color::Muted,
         w - 2,
     );
+    if let Some(selected) = &state.process_detail {
+        render_detail(&mut frame, selected, s, state.detail_offset);
+    }
     if state.help {
         let help = [
             "KEYBOARD",
             "Wheel        Scroll the panel under pointer",
             "Left drag    Resize any section divider",
+            "Click/p      Process details; Enter/Esc close",
             "q / Ctrl-C   Quit monitor (build continues)",
             "Space        Pause sampling and log reading",
             "Up / k       Scroll toward older log lines",
@@ -892,9 +1177,259 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     frame
 }
 
+fn render_detail(frame: &mut Frame, selected: &Process, snapshot: &Snapshot, offset: usize) {
+    let dialog = Dialog::new(frame.width, frame.height);
+    let current = snapshot.processes.iter().find(|p| p.pid == selected.pid);
+    let lines = detail_lines(
+        current.unwrap_or(selected),
+        current.is_some(),
+        dialog.width - 4,
+    );
+    let rows = dialog.height - 4;
+    let start = offset.min(lines.len().saturating_sub(rows));
+    let end = (start + rows).min(lines.len());
+    for row in dialog.y..dialog.y + dialog.height {
+        frame.text(
+            dialog.x,
+            row,
+            &" ".repeat(dialog.width),
+            Color::Text,
+            dialog.width,
+        );
+        frame.text(dialog.x, row, "│", Color::Cyan, 1);
+        frame.text(dialog.x + dialog.width - 1, row, "│", Color::Cyan, 1);
+    }
+    frame.text(
+        dialog.x,
+        dialog.y,
+        &format!("╭{}╮", "─".repeat(dialog.width - 2)),
+        Color::Cyan,
+        dialog.width,
+    );
+    frame.text(
+        dialog.x,
+        dialog.y + dialog.height - 1,
+        &format!("╰{}╯", "─".repeat(dialog.width - 2)),
+        Color::Cyan,
+        dialog.width,
+    );
+    frame.text(
+        dialog.x + 2,
+        dialog.y + 1,
+        "PROCESS DETAILS",
+        Color::Cyan,
+        dialog.width - 4,
+    );
+    let page = format!("{}-{end} / {}", start + 1, lines.len());
+    frame.text(
+        dialog.x + dialog.width - page.len() - 2,
+        dialog.y + 1,
+        &page,
+        Color::Muted,
+        page.len(),
+    );
+    for (index, line) in lines[start..end].iter().enumerate() {
+        frame.text(
+            dialog.x + 2,
+            dialog.y + 2 + index,
+            line,
+            Color::Text,
+            dialog.width - 4,
+        );
+    }
+    frame.text(
+        dialog.x + 2,
+        dialog.y + dialog.height - 2,
+        "Wheel/↑↓ Scroll · Enter/Esc Close",
+        Color::Muted,
+        dialog.width - 4,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_process_pane_shows_all_rows_when_space_allows_and_keeps_log_minimum() {
+        let snapshot = crate::monitor::demo(0);
+        let layout = Layout::new(110, 38, None, snapshot.processes.len());
+        assert_eq!(layout.process_rows(), snapshot.processes.len());
+        assert_eq!(Layout::new(110, 38, None, 15).process_rows(), 15);
+        assert_eq!(
+            layout.process_window(snapshot.processes.len(), 0),
+            0..snapshot.processes.len()
+        );
+        let crowded = Layout::new(110, 38, None, 200);
+        assert!(crowded.process_rows() < 200);
+        assert!(crowded.log.as_ref().unwrap().len() >= 4);
+        let manual = Layout::new(110, 38, Some([7, 7, 4]), 6);
+        assert_eq!(manual.process_rows(), 1);
+    }
+
+    #[test]
+    fn build_estimates_are_distinct_from_reported_lake_job_counts() {
+        let snapshot = crate::monitor::demo(0);
+        let mut log = LogTail::default();
+        log.progress = Some((342, 680));
+        let state = ViewState {
+            estimate: Estimate {
+                files: Some(120),
+                completed: 34,
+                total_seconds: Some(180.0),
+                remaining_seconds: Some(129.0),
+                scope: "local estimate".into(),
+            },
+            ..ViewState::default()
+        };
+        let text = render(
+            &View {
+                snapshot: &snapshot,
+                log: &log,
+                state: &state,
+                project: "/srv/riemann",
+                host: "ubuntu",
+                cores: 16,
+                interval_ms: 500,
+            },
+            110,
+            38,
+        )
+        .plain();
+        assert!(text.contains("Est. Lean files ≈ 120 · done 34"));
+        assert!(text.contains("342 / 680 jobs"));
+        assert!(text.contains("3m 0s total · ≈ 2m 9s left"));
+    }
+
+    #[test]
+    fn concise_process_rows_hide_paths_and_pid_but_details_preserve_them() {
+        let mut snapshot = crate::monitor::demo(0);
+        snapshot.processes[0].target = Some("/opt/lean files/Explicit Formula.lean".into());
+        let log = LogTail::default();
+        let mut state = ViewState::default();
+        let frame = render(
+            &View {
+                snapshot: &snapshot,
+                log: &log,
+                state: &state,
+                project: "/srv/riemann",
+                host: "ubuntu",
+                cores: 16,
+                interval_ms: 500,
+            },
+            110,
+            38,
+        );
+        let text = frame.plain();
+        assert!(text.contains("TYPE     MEMORY       TARGET"));
+        assert!(text.contains("Explicit Formula.lean"));
+        assert!(!text.contains("/opt/lean files/"));
+        assert!(!text.contains("28416"));
+        assert!(!text.chars().any(|c| ('▁'..='█').contains(&c) && c != '█'));
+        assert!(state.mouse(MouseKind::Press, 9, 20, (110, 38), &snapshot));
+        assert_eq!(state.process_detail.as_ref().unwrap().pid, 28416);
+        let details = render(
+            &View {
+                snapshot: &snapshot,
+                log: &log,
+                state: &state,
+                project: "/srv/riemann",
+                host: "ubuntu",
+                cores: 16,
+                interval_ms: 500,
+            },
+            110,
+            38,
+        )
+        .plain();
+        assert!(details.contains("PROCESS DETAILS"));
+        assert!(details.contains("28416"));
+        assert!(details.contains("/opt/lean files/Explicit Formula.lean"));
+        assert!(details.contains("COMMAND"));
+    }
+
+    #[test]
+    fn details_remain_tied_to_pid_and_do_not_scroll_background_panels() {
+        let mut snapshot = crate::monitor::demo(0);
+        snapshot.processes[1].command = format!("lean {}", "long-command-argument ".repeat(100));
+        let log = LogTail::default();
+        let mut state = ViewState {
+            pane_heights: Some([7, 7, 6]),
+            process_offset: 1,
+            offset: 6,
+            follow: false,
+            ..ViewState::default()
+        };
+        assert!(state.mouse(MouseKind::Press, 9, 20, (110, 38), &snapshot));
+        assert_eq!(state.process_detail.as_ref().unwrap().pid, 28421);
+        snapshot.processes.swap(0, 1);
+        assert!(state.wheel(false, 10, 20, (110, 38), &snapshot, &log));
+        assert!(state.detail_offset > 0);
+        assert_eq!(
+            (state.process_offset, state.offset, state.follow),
+            (1, 6, false)
+        );
+        assert!(!state.mouse(MouseKind::Press, 10, 20, (110, 38), &snapshot));
+        assert!(state.process_detail.is_some());
+        snapshot.processes.clear();
+        let lines = detail_lines(state.process_detail.as_ref().unwrap(), false, 96).join("\n");
+        assert!(lines.contains("No longer visible"));
+        assert!(state.mouse(MouseKind::Press, 1, 1, (110, 38), &snapshot));
+        assert!(state.process_detail.is_none());
+        assert_eq!(
+            (state.process_offset, state.offset, state.follow),
+            (1, 6, false)
+        );
+    }
+
+    #[test]
+    fn wrapped_logs_preserve_text_and_can_scroll_inside_a_single_long_record() {
+        let text = format!("BEGIN {} 끝END", "검증abc ".repeat(100));
+        let rows = wrap_text(&text, 48);
+        assert_eq!(rows.join(""), text);
+        assert!(rows
+            .iter()
+            .all(|line| line.chars().map(char_width).sum::<usize>() <= 48));
+        let snapshot = crate::monitor::demo(0);
+        let mut log = LogTail::default();
+        log.push(text);
+        assert_eq!(log_row_count(&log.visible_lines(), 52), rows.len());
+        let mut state = ViewState {
+            follow: true,
+            ..ViewState::default()
+        };
+        let view = |state: &ViewState| {
+            render(
+                &View {
+                    snapshot: &snapshot,
+                    log: &log,
+                    state,
+                    project: "/srv/riemann",
+                    host: "ubuntu",
+                    cores: 16,
+                    interval_ms: 500,
+                },
+                52,
+                24,
+            )
+            .plain()
+        };
+        assert!(view(&state).contains("끝END"));
+        state.scroll(true, usize::MAX, &log, 52);
+        assert!(state.offset > 0);
+        assert!(view(&state).contains("BEGIN"));
+    }
+
+    #[test]
+    fn wrapped_scroll_anchor_accounts_for_ring_eviction_and_growing_partial_lines() {
+        let before = vec!["abcdefghij".into(), "ok".into()];
+        let after = vec!["ok".into(), "newtextlong".into()];
+        assert_eq!(appended_log_rows(&before, 2, &after, 3, 10), 2);
+        assert_eq!(
+            appended_log_rows(&["abc".into()], 1, &["abcdefghij".into()], 1, 10),
+            1
+        );
+    }
 
     #[test]
     fn every_full_layout_divider_resizes_only_its_adjacent_sections() {
@@ -905,11 +1440,11 @@ mod tests {
                 follow: false,
                 ..ViewState::default()
             };
-            let before = Layout::new(110, 38, None);
+            let before = Layout::new(110, 38, None, snapshot.processes.len());
             let (upper, lower) = before.adjacent(index).unwrap();
             assert!(state.mouse(MouseKind::Press, 9, lower.start, (110, 38), &snapshot));
             assert!(state.mouse(MouseKind::Drag, 9, target, (110, 38), &snapshot));
-            let after = Layout::new(110, 38, state.pane_heights);
+            let after = Layout::new(110, 38, state.pane_heights, snapshot.processes.len());
             let (new_upper, new_lower) = after.adjacent(index).unwrap();
             assert_eq!(new_upper, upper.start..target);
             assert_eq!(new_lower, target..lower.end);
@@ -931,7 +1466,7 @@ mod tests {
     fn all_dividers_clamp_at_minimum_heights_in_full_and_compact_layouts() {
         let snapshot = crate::monitor::demo(0);
         for size in [(110, 38), (79, 24), (52, 20)] {
-            let initial = Layout::new(size.0, size.1, None);
+            let initial = Layout::new(size.0, size.1, None, snapshot.processes.len());
             for index in 0..3 {
                 let Some((_, lower)) = initial.adjacent(index) else {
                     continue;
@@ -940,7 +1475,8 @@ mod tests {
                     let mut state = ViewState::default();
                     state.mouse(MouseKind::Press, 9, lower.start, size, &snapshot);
                     state.mouse(MouseKind::Drag, 9, row, size, &snapshot);
-                    let layout = Layout::new(size.0, size.1, state.pane_heights);
+                    let layout =
+                        Layout::new(size.0, size.1, state.pane_heights, snapshot.processes.len());
                     assert!(layout.resources.len() >= 3);
                     assert!(layout.build.len() >= 3);
                     if let Some(region) = &layout.processes {
@@ -970,7 +1506,7 @@ mod tests {
             pane_heights: Some([3, 3, 3]),
             ..ViewState::default()
         };
-        let layout = Layout::new(110, 38, state.pane_heights);
+        let layout = Layout::new(110, 38, state.pane_heights, snapshot.processes.len());
         let frame = render(
             &View {
                 snapshot: &snapshot,
@@ -1019,6 +1555,7 @@ mod tests {
     fn divider_drag_resizes_logs_and_preserves_independent_scroll_state() {
         let snapshot = crate::monitor::demo(0);
         let mut state = ViewState {
+            pane_heights: Some([7, 7, 6]),
             process_offset: 3,
             offset: 6,
             follow: false,
@@ -1028,7 +1565,7 @@ mod tests {
         assert!(state.mouse(MouseKind::Press, 9, 24, (110, 38), &snapshot));
         assert!(state.dragging_divider.is_some());
         assert!(state.mouse(MouseKind::Drag, 9, 22, (110, 38), &snapshot));
-        let expanded = Layout::new(110, 38, state.pane_heights);
+        let expanded = Layout::new(110, 38, state.pane_heights, snapshot.processes.len());
         assert_eq!(expanded.log.as_ref().unwrap().start, 22);
         assert_eq!(expanded.process_rows(), 1);
         assert_eq!(
@@ -1041,7 +1578,7 @@ mod tests {
         assert_eq!(state.pane_heights, height);
         assert!(state.mouse(MouseKind::Press, 9, 22, (110, 38), &snapshot));
         assert!(state.mouse(MouseKind::Drag, 9, usize::MAX, (110, 38), &snapshot));
-        let shrunk = Layout::new(110, 38, state.pane_heights);
+        let shrunk = Layout::new(110, 38, state.pane_heights, snapshot.processes.len());
         assert_eq!(shrunk.log.as_ref().unwrap().len() - 1, 3);
         assert_eq!(
             state.process_offset, 0,
@@ -1058,10 +1595,11 @@ mod tests {
             log.push(format!("line {index}"));
         }
         let mut state = ViewState {
+            pane_heights: Some([7, 7, 6]),
             follow: true,
             ..ViewState::default()
         };
-        assert!(!state.mouse(MouseKind::Press, 9, 21, (110, 38), &snapshot));
+        assert!(!state.mouse(MouseKind::Press, 9, 14, (110, 38), &snapshot));
         assert!(!state.mouse(MouseKind::Press, 0, 24, (110, 38), &snapshot));
         state.mouse(MouseKind::Press, 9, 24, (110, 38), &snapshot);
         state.mouse(MouseKind::Drag, 9, 30, (110, 38), &snapshot);
@@ -1095,7 +1633,7 @@ mod tests {
                     pane_heights: requested,
                     ..ViewState::default()
                 };
-                let layout = Layout::new(width, height, requested);
+                let layout = Layout::new(width, height, requested, snapshot.processes.len());
                 if let Some(range) = &layout.log {
                     assert!(range.len() >= 4);
                 }
@@ -1133,6 +1671,7 @@ mod tests {
             log.push(format!("log line {index}"));
         }
         let mut state = ViewState {
+            pane_heights: Some([7, 7, 6]),
             follow: true,
             ..ViewState::default()
         };
@@ -1232,7 +1771,10 @@ mod tests {
     fn process_scroll_bounds_and_shrinking_lists_are_clamped() {
         let snapshot = crate::monitor::demo(0);
         let log = LogTail::default();
-        let mut state = ViewState::default();
+        let mut state = ViewState {
+            pane_heights: Some([7, 7, 6]),
+            ..ViewState::default()
+        };
         for _ in 0..100 {
             state.wheel(false, 9, 21, (110, 38), &snapshot, &log);
         }

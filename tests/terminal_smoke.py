@@ -80,6 +80,26 @@ def exercise(binary, quit_key=None):
         expect(b"PAUSED", b" ")
         drain()
         assert all(f"\x1b[?{mode}h".encode() in captured for mode in (1000,1002,1006))
+        assert b"1-6 / 6" in captured, "All demo processes should fit by default"
+        assert b"TYPE     MEMORY       TARGET" in captured
+        assert "▆".encode() not in captured, "CPU history graph was removed"
+
+        # Details expose full paths and PID without crowding normal rows.
+        output = event_output(b"\x1b[<0;10;21M",b"PROCESS DETAILS")
+        assert b"28416" in output and b"TARGET PATH" in output and b"COMMAND" in output
+        event_output(b"\x1b[<0;10;21m")
+        event_output(b"\x1b",b"PROCESSES")
+        event_output(b"p",b"PROCESS DETAILS")
+        event_output(b"\r")
+        output = event_output(b"\x1b[<0;10;22M",b"PROCESS DETAILS")
+        assert b"28421" in output
+        event_output(b"\x1b[<0;10;22m")
+        event_output(b"\x1b[<0;2;2M")
+
+        # Explicitly shrink the auto-sized process panel to exercise scrolling.
+        event_output(b"\x1b[<0;10;28M")
+        event_output(b"\x1b[<32;10;25M",b"1-3 / 6")
+        event_output(b"\x1b[<0;10;25m")
 
         # Mouse coordinates are physical terminal coordinates (one-based).
         # Process scrolling must not change the log viewport or follow mode.
@@ -96,7 +116,7 @@ def exercise(binary, quit_key=None):
         event_output(b"f")
 
         assert event_output(b"\x1b[<65;5;7M") == b"", "Wheel outside panels must be ignored"
-        assert event_output(b"\x1b[<0;10;22M") == b"", "Click must not scroll"
+        assert event_output(b"\x1b[<0;10;20M") == b"", "Clicking a table header must not scroll"
         assert event_output(b"\x1b[<65;10;22m") == b"", "Mouse release must not scroll"
 
         event_output(b"?", b"KEYBOARD")
@@ -187,11 +207,23 @@ def main():
     plain = subprocess.check_output([binary, "--demo", "--snapshot"])
     assert b"\x1b" not in plain
     assert b"342 / 680" in plain
+    assert b"Est. Lean files" in plain and b"Est. time" in plain
     bad = subprocess.run([binary, "--interval-ms", "99"], capture_output=True)
     assert bad.returncode != 0
     non_tty = subprocess.run([binary, "--demo"], capture_output=True)
     assert non_tty.returncode != 0 and b"requires a terminal" in non_tty.stderr
     with tempfile.TemporaryDirectory(prefix="lean-top-smoke-") as directory:
+        logs = Path(directory) / "logs"
+        logs.mkdir()
+        (logs / "z.log").write_text("EXPLICIT_Z_LOG\n")
+        (logs / "a.log").write_text("FIRST_A_LOG\n")
+        isolated = dict(os.environ,HOME=directory)
+        selected = subprocess.check_output([binary,"--project",directory,"--snapshot"],env=isolated,timeout=5)
+        assert b"FIRST_A_LOG" in selected and b"EXPLICIT_Z_LOG" not in selected
+        explicit = subprocess.check_output([binary,"--project",directory,"--log",str(logs / "z.log"),"--snapshot"],env=isolated,timeout=5)
+        assert b"EXPLICIT_Z_LOG" in explicit and b"FIRST_A_LOG" not in explicit
+        demo = subprocess.check_output([binary,"--demo","--snapshot"],env=isolated,timeout=5)
+        assert b"FIRST_A_LOG" not in demo
         fifo = os.path.join(directory, "not-a-log")
         os.mkfifo(fifo)
         rejected = subprocess.check_output([binary, "--snapshot", "--log", fifo], timeout=5)
@@ -207,12 +239,84 @@ def main():
         assert b"2 / 20 jobs" in observed, "Use Lake's changing job total, including pending spinner output"
     for key in (b"q", b"\x03", None):
         exercise(binary, key)
+    exercise_wrapping(binary)
+    exercise_estimates(binary)
     if sys.platform.startswith("linux"):
         live = subprocess.check_output([binary, "--snapshot"])
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+
+
+def exercise_wrapping(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-wrap-") as directory:
+        log = Path(directory) / "build.log"
+        log.write_text("START_" + "x" * (48 * 10 - 6) + "END_MARKER\n")
+        master,slave = os.openpty()
+        fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
+        process = subprocess.Popen([binary,"--log",str(log),"--project",directory],stdin=slave,stdout=slave,stderr=slave)
+        def output_until_marker():
+            data = bytearray()
+            deadline = time.monotonic()+5
+            while time.monotonic()<deadline:
+                if select.select([master],[],[],0.1)[0]:
+                    data.extend(os.read(master,65536))
+                    if b"END_MARKER" in data:
+                        return bytes(data)
+            raise AssertionError(f"Missing wrapped log tail: {data[-1000:]!r}")
+        try:
+            output_until_marker()
+            fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,53,0,0))
+            output = output_until_marker()
+            assert b"START_" in output and b"x"*48 in output
+            os.write(master,b"q")
+            deadline = time.monotonic()+5
+            while process.poll() is None and time.monotonic()<deadline:
+                if select.select([master],[],[],0.1)[0]:
+                    os.read(master,65536)
+            assert process.poll()==0
+        finally:
+            if process.poll() is None:
+                process.kill();process.wait()
+            os.close(master);os.close(slave)
+
+
+def exercise_estimates(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-estimate-") as directory:
+        project = Path(directory)
+        for module in "ABC":
+            (project / f"{module}.lean").write_text(f"def {module.lower()} := 0\n")
+        log = project / "build.log"
+        log.write_text("✔ [1/10] Built A (1s)\n✔ [2/10] Built B (2s)\n✔ [3/10] Built C (3s)\n",encoding="utf-8")
+        master,slave = os.openpty()
+        fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
+        process = subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
+        def expect_all(needles):
+            data = bytearray()
+            deadline = time.monotonic()+5
+            while time.monotonic()<deadline:
+                if select.select([master],[],[],0.1)[0]:
+                    data.extend(os.read(master,65536))
+                    if all(needle in data for needle in needles):
+                        return bytes(data)
+            raise AssertionError(f"Missing estimate evidence {needles!r}: {data[-1500:]!r}")
+        try:
+            expect_all(["Est. Lean files ≈ 3 · done 0".encode(),b"6s total",b"6s left"])
+            with log.open("a",encoding="utf-8") as output:
+                output.write("✔ [4/10] Built A (1s)\n")
+            expect_all(["Est. Lean files ≈ 3 · done 1".encode()])
+            os.write(master,b"q")
+            deadline = time.monotonic()+5
+            while process.poll() is None and time.monotonic()<deadline:
+                if select.select([master],[],[],0.1)[0]:
+                    os.read(master,65536)
+            assert process.poll()==0
+            assert sorted(path.name for path in project.iterdir()) == ["A.lean","B.lean","C.lean","build.log"], "Estimation must not write artifacts"
+        finally:
+            if process.poll() is None:
+                process.kill();process.wait()
+            os.close(master);os.close(slave)
 
 
 if __name__ == "__main__":

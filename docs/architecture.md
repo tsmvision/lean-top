@@ -9,7 +9,8 @@
 | `src/main.rs` | CLI validation, sampling schedule, keyboard dispatch, demo generation, snapshot output |
 | `src/input.rs` | Bounded keyboard, SGR mouse, and legacy X10 input decoding |
 | `src/monitor.rs` | System snapshots, Lean process discovery, bounded log tailing, output sanitization, progress parsing |
-| `src/ui.rs` | Shared layout and mouse hit testing, terminal cells, colors, CPU history, independent panel scrolling, row-difference rendering |
+| `src/estimate.rs` | Bounded background source/import analysis and timing/throughput estimates |
+| `src/ui.rs` | Shared layout and mouse hit testing, terminal cells, wrapped logs, process details, independent panel scrolling, row-difference rendering |
 | `src/terminal.rs` | TTY setup/restoration, terminal dimensions, alternate screen, shutdown signals |
 | `src/monitor_tests.rs` | Synthetic system and log tests |
 
@@ -27,7 +28,9 @@ CPU utilization uses differences between aggregate `/proc/stat` counters. Idle i
 
 Memory uses `MemTotal` and `MemAvailable` from `/proc/meminfo`. Swap uses `SwapTotal` and `SwapFree`. Load averages come from `/proc/loadavg`.
 
-Process discovery visits numeric `/proc` entries and matches `comm` against `lean`, `lake`, and `leanc`. It reads RSS from `status` and at most 4096 bytes of `cmdline`. Processes may disappear during a scan; missing process details are tolerated. Results are sorted by RSS, and the full layout defaults to a scrollable window of three rows. Resizing either process boundary changes its viewport height. The process offset is independent of log scrolling and clamped when the list shrinks or its viewport grows. Discovery is server-wide and does not associate processes with `--project`.
+Process discovery visits numeric `/proc` entries and matches `comm` against `lean`, `lake`, and `leanc`. It reads RSS from `status` and at most 4096 bytes of `cmdline`. NUL-separated argument boundaries are retained for best-effort source detection, skipping known output and option values. Display commands quote whitespace/empty/apostrophe-containing arguments; no command is executed. Relative compiler targets are joined to a readable `/proc/PID/cwd`; when it is inaccessible, the supplied relative path is retained. Lake targets are command labels.
+
+Results are sorted by RSS. Automatic layout sizes Processes for all matching entries that fit, reducing optional summary space before clipping the list; the log minimum is preserved. Manual divider heights override automatic sizing. The concise table shows type, RSS, and target basename. Details use the selected PID to look up live data and retain one cached row for the no-longer-visible case. Long fields wrap and scroll independently of background panels. Process exits, sorting, empty lists, and inaccessible details are tolerated. Discovery is server-wide and does not associate processes with `--project`.
 
 Storage calls `statvfs` directly for the project directory. The implementation uses a 64-bit Linux ABI declaration; unsupported targets report unavailable storage. Used space excludes filesystem free blocks, while the displayed free space uses blocks available to an unprivileged user. The monitor does not recursively measure project or `.lake` directory sizes, and it does not measure disk I/O throughput.
 
@@ -39,9 +42,21 @@ Reads are limited to the most recent 64 KiB window. If the unread gap exceeds th
 
 Newline and carriage return both delimit records, supporting Lake progress updates. Raw pending bytes preserve ordinary UTF-8 sequences split between file reads. Completed records are decoded with replacement for invalid bytes. The sanitizer strips terminal control characters and CSI/OSC escape sequences before rendering. Tabs expand to four spaces.
 
+Each retained log record wraps at the current panel width using the renderer's character-width model. Severity color applies to all its continuation rows. Log offsets count display rows, permitting scrolling within one long record. When new records arrive or ring entries are evicted, wrapped row counts preserve the reading position. Raw retention limits remain unchanged; terminal reflow does not increase them.
+
 Progress parsing recognizes a leading Lake status record: an optional status icon, `[reported/total]`, an optional `(Optional)` marker, and a known action verb followed by its caption. Arbitrary diagnostic fractions are ignored. The numbers must be nonnegative with a positive total and `reported <= total`. A complete status prefix in the current partial line can update the display before its trailing newline or carriage return.
 
 The counters are Lake job observations, not completed source-file counts. Dependency discovery can grow the denominator, and multiple facets can contribute jobs for one module. The raw numbers are preserved without an inferred offset or a source-tree scan. “Latest event” displays a retained recognized status record. In particular, Lake can use `Building` in a failed completed-job report; it must not be interpreted as evidence of a currently compiling file. See the official [build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164) and [job action verbs](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Job/Basic.lean#L24-L58). Neither a job counter nor a caption is an exit-status or theorem-verification protocol.
+
+The exact future Lean-file compilation total is unknown without a complete build-side plan. Ordinary logs and sampled `/proc` targets cannot establish that denominator. `lake query` builds targets, and `--no-build` stops at stale work rather than producing a full read-only plan; neither is launched by the monitor. See [CLI semantics](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/CLI/Help.lean#L46-L75) and [module build/cache decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
+
+## Estimation
+
+A background worker performs a bounded, read-only inventory of local `.lean` files and recursively resolved imports, including available `.lake/packages` sources. It uses the standard `.lake/build/lib/lean` artifact layout and safe source-directory hints; unsupported configuration is covered by the explicit low-confidence scope. Missing/newer artifacts and conservative dependency invalidation produce the initial stale set. That set is held constant as outputs appear, expanded on contrary observed compilation evidence, and restarted for a detected new log run. File/entry/header limits prevent unbounded analysis. The UI polls a channel instead of blocking on the scan or repeating it every refresh.
+
+Known source-module `Built` records contribute timings and post-baseline completions. Initial retained output calibrates timings without claiming those records completed after monitoring began. Replay/reuse, unmatched targets, and native facets are excluded. A bounded window of wall-clock completion observations captures parallel throughput; reported `ms`/`s` durations can seed estimates when sufficient samples exist. Lack of data remains `Learning`, rather than a fabricated per-file speed. Total and remaining predictions describe the estimated Lean work in the observation window, not the full historical Lake run or native/linking phases. Hash/cache semantics and dynamic target declarations can make the stale estimate over- or under-count actual work, so the display remains approximate.
+
+Absent `--log`, startup finds the filename-minimum regular non-hidden `.log` file directly under `$HOME/logs`; explicit paths take precedence. Discovery does not write files and is not a recurring directory scan. Missing matches leave the log unselected.
 
 ## Terminal rendering
 
@@ -61,6 +76,6 @@ The renderer handles common CJK characters as double-width and omits common comb
 
 The monitor does not launch builds, manage their lifecycle, execute `lake`, make network requests, or persist monitoring data. It reads files and writes its terminal display. Shell pipelines documented in the README write their own build logs independently.
 
-The implementation avoids per-refresh child commands and bounds retained logs, CPU history, and keyboard input. System process scans and terminal-frame size still affect overhead. There is no guaranteed CPU, memory, or storage-usage budget.
+The implementation avoids per-refresh child commands and bounds retained logs and keyboard input. CPU history storage and its graph have been removed. System process scans, wrapping, and terminal-frame size still affect overhead. There is no guaranteed CPU, memory, or storage-usage budget.
 
 macOS supports demo/development use, not the production system-metric path. Test fixtures exercise Linux text formats without establishing that every Linux ABI or terminal is supported. Validate live sampling on the actual Ubuntu target.

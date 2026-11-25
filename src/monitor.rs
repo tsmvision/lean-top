@@ -10,6 +10,7 @@ pub struct Process {
     pub name: String,
     pub rss: u64,
     pub command: String,
+    pub target: Option<String>,
 }
 
 #[derive(Default)]
@@ -80,19 +81,112 @@ pub fn processes(proc: &Path) -> std::io::Result<Vec<Process>> {
         if let Ok(file) = File::open(path.join("cmdline")) {
             let _ = file.take(4096).read_to_end(&mut args);
         }
-        let command = String::from_utf8_lossy(&args)
-            .replace('\0', " ")
-            .trim()
-            .to_string();
+        let (command, target) = process_arguments(name, &args);
+        let target = target.map(|target| {
+            if name != "lake" && Path::new(&target).is_relative() {
+                if let Ok(cwd) = fs::read_link(path.join("cwd")) {
+                    if cwd.is_absolute() {
+                        return cwd.join(&target).to_string_lossy().into_owned();
+                    }
+                }
+            }
+            target
+        });
         result.push(Process {
             pid,
             name: name.into(),
             rss,
             command,
+            target,
         });
     }
     result.sort_unstable_by_key(|p| std::cmp::Reverse(p.rss));
     Ok(result)
+}
+
+/// Interpret kernel-provided argv boundaries directly, without shell parsing.
+fn process_arguments(name: &str, raw: &[u8]) -> (String, Option<String>) {
+    let mut arguments: Vec<_> = raw
+        .split(|byte| *byte == 0)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    if arguments.last().is_some_and(String::is_empty) {
+        arguments.pop();
+    }
+    let command = arguments
+        .iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "_./:-=+,@%".contains(c))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut skip_value = false;
+    let mut positional_only = false;
+    let mut target = None;
+    for argument in arguments.iter().skip(1) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if !positional_only {
+            if argument == "--" {
+                positional_only = true;
+                continue;
+            }
+            if matches!(
+                argument.as_str(),
+                "-o" | "-i"
+                    | "--output"
+                    | "--interface"
+                    | "--root"
+                    | "-R"
+                    | "-I"
+                    | "-L"
+                    | "-l"
+                    | "-D"
+                    | "-isystem"
+                    | "-iquote"
+                    | "-include"
+                    | "-imacros"
+                    | "-MF"
+                    | "-MT"
+                    | "-MQ"
+                    | "-d"
+                    | "--dir"
+                    | "-j"
+                    | "--jobs"
+                    | "-f"
+                    | "--file"
+            ) {
+                skip_value = true;
+                continue;
+            }
+            if argument.starts_with('-') {
+                continue;
+            }
+        }
+        let source = match name {
+            "lean" => argument.ends_with(".lean"),
+            "leanc" => [".c", ".cc", ".cpp", ".cxx"]
+                .iter()
+                .any(|suffix| argument.ends_with(suffix)),
+            "lake" => !argument.is_empty(),
+            _ => false,
+        };
+        if source {
+            target = Some(argument.clone());
+            break;
+        }
+    }
+    (command, target)
 }
 
 pub struct Sampler {
@@ -439,36 +533,42 @@ pub fn demo(tick: u64) -> Snapshot {
                 name: "lean".into(),
                 rss: (1.8 * gib as f64) as u64,
                 command: "lean RiemannHypothesis/ExplicitFormula.lean".into(),
+                target: Some("RiemannHypothesis/ExplicitFormula.lean".into()),
             },
             Process {
                 pid: 28421,
                 name: "lean".into(),
                 rss: (1.2 * gib as f64) as u64,
                 command: "lean RiemannHypothesis/ZetaBounds.lean".into(),
+                target: Some("RiemannHypothesis/ZetaBounds.lean".into()),
             },
             Process {
                 pid: 28431,
                 name: "lean".into(),
                 rss: 800 * 1024 * 1024,
                 command: "lean RiemannHypothesis/ZeroFreeRegion.lean".into(),
+                target: Some("RiemannHypothesis/ZeroFreeRegion.lean".into()),
             },
             Process {
                 pid: 28441,
                 name: "lean".into(),
                 rss: 600 * 1024 * 1024,
                 command: "lean RiemannHypothesis/CriticalStrip.lean".into(),
+                target: Some("RiemannHypothesis/CriticalStrip.lean".into()),
             },
             Process {
                 pid: 28451,
                 name: "leanc".into(),
                 rss: 96 * 1024 * 1024,
                 command: "leanc .lake/build/ir/RiemannHypothesis/ZetaBounds.c".into(),
+                target: Some(".lake/build/ir/RiemannHypothesis/ZetaBounds.c".into()),
             },
             Process {
                 pid: 28390,
                 name: "lake".into(),
                 rss: 84 * 1024 * 1024,
                 command: "lake build".into(),
+                target: Some("build".into()),
             },
         ],
         warnings: vec![],

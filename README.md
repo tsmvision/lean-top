@@ -50,6 +50,8 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log
 
 `--project` selects the filesystem for storage capacity and the directory shown in the header. A relative `--log` path is resolved against the monitor's working directory, independently of `--project`. The log file may be created after the monitor starts; missing files are retried.
 
+When `--log` is omitted, startup selects the first regular, non-hidden `*.log` file in `~/logs`, ordered by filename. This is a nonrecursive lookup and does not mean the newest file. An explicit `--log` overrides discovery. If no matching file or home directory is available, system monitoring still starts without a log. Demo mode never selects a real log automatically.
+
 ## Screen
 
 Abbreviated demo snapshot; all values below are simulated:
@@ -66,14 +68,19 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
 
 BUILD
 ● ACTIVE    6 Lean/Lake processes · server-wide
+Est. Lean files ≈ 120 · done 34 · demo estimate
 ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680 jobs
+Est. time ≈ 3m total · ≈ 2m 9s left
 Latest event   ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
-PROCESSES · 1-3 / 6
-PID      NAME      MEMORY       COMMAND
-28416    lean      1.8 GiB      lean RiemannHypothesis/ExplicitFormula.lean
-28421    lean      1.2 GiB      lean RiemannHypothesis/ZetaBounds.lean
-28431    lean      800 MiB      lean RiemannHypothesis/ZeroFreeRegion.lean
+PROCESSES · 1-6 / 6
+TYPE     MEMORY       TARGET
+lean     1.8 GiB      ExplicitFormula.lean
+lean     1.2 GiB      ZetaBounds.lean
+lean     800 MiB      ZeroFreeRegion.lean
+lean     600 MiB      CriticalStrip.lean
+leanc     96 MiB      ZetaBounds.c
+lake      84 MiB      build
 
 BUILD LOG
 ✔ [340/680] Built RiemannHypothesis.ZetaBounds
@@ -87,6 +94,8 @@ The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller 
 
 Unchanged log rows stay on screen while resource metrics continue to refresh. The log's last-read time is a fixed UTC timestamp that changes only when new bytes are read, rather than a continuously advancing age counter. Scrolling, help, and terminal resizing can still redraw the affected area.
 
+Log text wraps to the panel width, including when the terminal narrows. Scroll through display rows to inspect every retained part of a long record; continuation rows keep the original severity color. The original 200-record/4 KiB-per-record retention limits still apply. CPU shows its current utilization bar; the history graph has been removed.
+
 ## Controls and options
 
 | Key | Action |
@@ -94,6 +103,9 @@ Unchanged log rows stay on screen while resource metrics continue to refresh. Th
 | Mouse wheel over Processes | Scroll that process list up/down; full layout only |
 | Mouse wheel over Build Log | Scroll older/newer retained log lines |
 | Left-drag a section divider | Resize the sections immediately above and below it |
+| Click a process row | Open PID, memory, full target path, and command details |
+| `p` or `Enter` | Open details for the first visible process, or close an open details panel |
+| `Esc` or click outside details | Close the process details panel |
 | `q` or `Ctrl-C` | Quit the monitor; the separate build continues |
 | `Space` | Pause/resume metric sampling and log reading |
 | `↑` / `k` | Scroll toward older retained log lines |
@@ -102,6 +114,8 @@ Unchanged log rows stay on screen while resource metrics continue to refresh. Th
 | `?` | Toggle keyboard help |
 
 Hover over the panel you want to scroll; clicking to focus is unnecessary. The two panels keep independent positions. Process scrolling leaves log following unchanged. Log scrolling disables automatic following; press `f` to return to the live tail. Mouse scrolling also works while sampling is paused and is ignored while help is open. It requires a terminal that forwards XTerm-compatible mouse reports. The log's existing keyboard controls remain available.
+
+The process table shows only type, memory, and a short target name. Open details to read full paths and command arguments, using the wheel or arrow keys to scroll long values. Details track the selected PID across sorting changes and label the last captured data if that process is no longer visible. Metrics continue updating behind the panel. Compiler targets are detected from kernel-provided arguments; relative paths are resolved against the process working directory when permissions allow. Lake rows show their command label, such as `build`, rather than a fabricated source filename.
 
 Hold the left mouse button on a section divider and drag up or down. Each divider redistributes space between the two adjacent sections:
 
@@ -116,7 +130,7 @@ CPU, Memory, and Storage share one resource row and resize together. Only the ap
 | Option | Meaning |
 | --- | --- |
 | `--project PATH` | Existing project directory; defaults to the current directory |
-| `--log PATH` | Existing or future build-log file |
+| `--log PATH` | Existing or future build-log file; default is the first filename-sorted `~/logs/*.log` |
 | `--interval-ms MS` | Refresh interval from 100 to 60000 ms; default 500 |
 | `--demo` | Simulated resources, processes, and build output; cannot be combined with `--log` |
 | `--snapshot` | Print a single plain-text frame and exit |
@@ -135,10 +149,14 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **CPU** is aggregate server utilization calculated from consecutive `/proc/stat` samples, on a 0–100% scale. The first sample has no rate yet. Load averages cover 1, 5, and 15 minutes.
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
-- **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. The full screen defaults to a scrollable window of three rows; resizing the log changes the space available for processes. The heading shows the visible range and total. The process list remains live, so ordering can change with RSS and process exits. Processes are not filtered by project.
+- **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. By default the pane grows to show all entries that fit, reducing optional summary space if necessary while preserving the log minimum. Excess entries remain scrollable when terminal space runs out. Dragging a divider sets a manual height for the session. The heading shows the visible range and total. Processes are live and not filtered by project.
 - **ACTIVE/IDLE** reflects whether any of those processes were detected. **Lake jobs** preserves the latest `[reported/total]` pair from a recognized Lake status record, including a running spinner before its trailing newline. “Latest event” shows a recent retained Lake status record.
 
 Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).
+
+**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen for the observed run and can expand if real compilations contradict it. Recognized source-module `Built` events update completion counts. Time estimates learn from observed completion throughput and reported module timings; cold starts show `Learning` until samples exist. No second Lake build or recurring source-tree scan is launched.
+
+All predictions use `≈` and a confidence/scope label. They are not Lake's exact build plan: dynamic/custom target configuration, generated modules, cache layout, and hash-based dependency decisions can change actual work. The scan uses a local/import fallback rather than executing `lakefile.lean`. The displayed total time estimates the analyzed Lean compilation work from the monitor's observation window, not a recovered start time for a build you joined midway, and it excludes unrelated native/link jobs. See [Lake's module build decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
 
 Log progress can belong to an earlier run and does not supply a build exit code. A full progress bar does not establish a successful build or a valid theorem proof. This tool does not inspect Lean declarations, axioms, `sorry`, or proof artifacts.
 

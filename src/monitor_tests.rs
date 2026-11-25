@@ -183,6 +183,9 @@ fn process_scan_filters_names_and_orders_by_resident_memory() {
     assert_eq!(found[0].rss, 800 * 1024);
     assert_eq!(found[0].name, "lean");
     assert_eq!(found[0].command, "lean Riemann/Zeta.lean");
+    assert_eq!(found[0].target.as_deref(), Some("Riemann/Zeta.lean"));
+    assert_eq!(found[1].target.as_deref(), Some("generated.c"));
+    assert_eq!(found[2].target.as_deref(), Some("build"));
 }
 
 #[test]
@@ -195,6 +198,112 @@ fn process_arguments_are_bounded_and_missing_details_are_tolerated() {
     assert_eq!(found[0].command.len(), 4096);
     assert_eq!(found[1].rss, 0);
     assert!(found[1].command.is_empty());
+    assert!(found[0].target.is_none());
+    assert!(found[1].target.is_none());
+}
+
+#[test]
+fn process_targets_preserve_argv_paths_and_skip_output_and_option_values() {
+    let fixture = Fixture::new();
+    fixture.process(10, "lean", 100,
+        b"/opt/lean/bin/lean\0--root\0/srv/root.lean\0-o\0/srv/output.lean\0-i\0interface.lean\0/srv/proofs with spaces/Formula.lean\0");
+    fixture.process(11, "leanc", 80,
+        b"leanc\0-o\0generated.c\0-include\0prelude.c\0-I\0include.c\0/srv/native code/Formula.cpp\0");
+    fixture.process(
+        12,
+        "lake",
+        60,
+        b"/opt/bin/lake\0-d\0/srv/proofs with spaces\0build\0Riemann\0",
+    );
+    let found = processes(&fixture.0).unwrap();
+    assert_eq!(
+        found[0].target.as_deref(),
+        Some("/srv/proofs with spaces/Formula.lean")
+    );
+    assert!(found[0]
+        .command
+        .contains("'/srv/proofs with spaces/Formula.lean'"));
+    assert_eq!(
+        found[1].target.as_deref(),
+        Some("/srv/native code/Formula.cpp")
+    );
+    assert_eq!(found[2].target.as_deref(), Some("build"));
+}
+
+#[test]
+fn process_targets_do_not_fabricate_source_files_from_options_or_unrelated_args() {
+    for (name, args, expected) in [
+        (
+            "lean",
+            b"lean\0-o\0output.lean\0--root=directory.lean\0".as_slice(),
+            None,
+        ),
+        ("lean", b"lean\0--server\0", None),
+        ("lean", b"lean\0--\0-Source.lean\0", Some("-Source.lean")),
+        (
+            "lean",
+            b"lean\0--run\0Main.lean\0argument.lean\0",
+            Some("Main.lean"),
+        ),
+        (
+            "leanc",
+            b"leanc\0-DVALUE=not-a-source.c\0source.cc\0",
+            Some("source.cc"),
+        ),
+        ("lake", b"lake\0", None),
+        (
+            "lake",
+            b"lake\0-j\08\0-f\0lakefile.lean\0build\0",
+            Some("build"),
+        ),
+        ("lean", b"", None),
+    ] {
+        assert_eq!(process_arguments(name, args).1.as_deref(), expected);
+    }
+}
+
+#[test]
+fn command_display_retains_empty_and_quoted_arguments_without_execution() {
+    let (command, target) = process_arguments("lean", b"lean\0\0/srv/it's a proof.lean\0");
+    assert_eq!(command, "lean '' '/srv/it'\\''s a proof.lean'");
+    assert_eq!(target.as_deref(), Some("/srv/it's a proof.lean"));
+}
+
+#[test]
+fn relative_process_source_paths_resolve_against_cwd_when_available() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    fixture.process(10, "lean", 100, b"lean\0Proofs with spaces/Formula.lean\0");
+    fixture.process(11, "leanc", 80, b"leanc\0.lake/build/Formula.c\0");
+    fixture.process(12, "lake", 60, b"lake\0build\0");
+    fixture.process(13, "lean", 40, b"lean\0/srv/absolute/Formula.lean\0");
+    fixture.process(14, "lean", 20, b"lean\0Relative.lean\0");
+    for pid in [10, 11, 12, 13] {
+        symlink("/srv/riemann", fixture.0.join(format!("{pid}/cwd"))).unwrap();
+    }
+    let found = processes(&fixture.0).unwrap();
+    assert_eq!(
+        found[0].target.as_deref(),
+        Some("/srv/riemann/Proofs with spaces/Formula.lean")
+    );
+    assert_eq!(
+        found[1].target.as_deref(),
+        Some("/srv/riemann/.lake/build/Formula.c")
+    );
+    assert_eq!(
+        found[2].target.as_deref(),
+        Some("build"),
+        "Lake commands are not source paths"
+    );
+    assert_eq!(
+        found[3].target.as_deref(),
+        Some("/srv/absolute/Formula.lean")
+    );
+    assert_eq!(
+        found[4].target.as_deref(),
+        Some("Relative.lean"),
+        "Unreadable cwd retains captured relative path"
+    );
 }
 
 #[test]

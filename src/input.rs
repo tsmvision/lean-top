@@ -3,6 +3,7 @@
 //! Mouse encodings follow XTerm Control Sequences, "Normal tracking mode",
 //! "Wheel mice", and "SGR (1006)":
 //! https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Mouse-Tracking
+use std::time::{Duration, Instant};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
@@ -43,6 +44,7 @@ pub struct Decoder {
     state: State,
     bytes: [u8; 64],
     len: usize,
+    escape_at: Option<Instant>,
 }
 
 impl Default for Decoder {
@@ -51,11 +53,28 @@ impl Default for Decoder {
             state: State::default(),
             bytes: [0; 64],
             len: 0,
+            escape_at: None,
         }
     }
 }
 
 impl Decoder {
+    /// Resolve a standalone Escape without splitting normal escape packets.
+    pub fn take_escape(&mut self) -> bool {
+        if matches!(self.state, State::Escape)
+            && self
+                .escape_at
+                .is_some_and(|at| at.elapsed() >= Duration::from_millis(100))
+        {
+            self.state = State::Ground;
+            self.len = 0;
+            self.escape_at = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Feed one wire byte. Mouse coordinates in returned events are zero-based.
     /// Unknown and malformed escape sequences are consumed, not sent as keys.
     pub fn feed(&mut self, byte: u8) -> Option<Event> {
@@ -64,6 +83,7 @@ impl Decoder {
         if matches!(byte, 3 | 4) {
             self.state = State::Ground;
             self.len = 0;
+            self.escape_at = None;
             return Some(Event::Key(byte));
         }
         // X10 has exactly three raw payload bytes, which must never become keys.
@@ -85,11 +105,13 @@ impl Decoder {
         if byte == 27 {
             self.state = State::Escape;
             self.len = 0;
+            self.escape_at = Some(Instant::now());
             return None;
         }
         match self.state {
             State::Ground => Some(Event::Key(byte)),
             State::Escape => {
+                self.escape_at = None;
                 self.state = match byte {
                     b'[' => State::Csi,
                     b'O' => State::Ss3,
@@ -188,6 +210,20 @@ fn mouse(button: usize, column: usize, row: usize, release: bool) -> Option<Even
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_escape_waits_but_does_not_consume_arrow_sequences() {
+        let mut decoder = Decoder::default();
+        decoder.feed(27);
+        assert!(!decoder.take_escape());
+        decoder.escape_at = Some(Instant::now() - Duration::from_secs(1));
+        assert!(decoder.take_escape());
+        assert_eq!(decoder.feed(b'p'), Some(Event::Key(b'p')));
+        for byte in b"\x1b[A" {
+            let _ = decoder.feed(*byte);
+        }
+        assert!(!decoder.take_escape());
+    }
 
     fn decode(bytes: &[u8]) -> Vec<Event> {
         let mut decoder = Decoder::default();

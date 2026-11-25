@@ -15,7 +15,7 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --snapshot
 
 ## The screen asks to be resized
 
-Use at least 53 terminal columns × 20 rows for the compact layout, or 91 columns × 32 rows for the full layout. The application reserves one column to avoid wrapping at the right edge. The compact layout omits the process table, CPU history, load, swap, and available/free detail rows.
+Use at least 53 terminal columns × 20 rows for the compact layout, or 91 columns × 32 rows for the full layout. The application reserves one column to avoid wrapping at the right edge. Compact mode hides the process table and initially shows only the core resource rows; expand Resources to reveal available details. CPU history is no longer displayed in either layout.
 
 ## System metrics are unavailable
 
@@ -51,6 +51,8 @@ lake build 2>&1 | tee build.log
 
 The monitor does not create the log or launch the build. Check that the build is actually emitting output, press `Space` if sampling is paused, and press `f` to return to following the tail.
 
+If `--log` is omitted, the application chooses the filename-sorted first regular non-hidden `.log` file in `~/logs` at startup. It does not choose by modification time or search subdirectories. If no file exists yet, pass the future filename explicitly or restart after creating it. Use `--log` when multiple runs are present and you need a specific one.
+
 ## Progress is missing, old, or apparently complete
 
 The progress bar requires a recognized Lake status record such as `✔ [3/8] Built Foo` or `⣾ [3/8] Running Foo`. A complete status prefix can update the display before a newline arrives. Arbitrary `[n/m]` text in diagnostics does not update the counter. “Latest event” is a recent retained Lake status record; it does not identify the only file currently compiling.
@@ -73,7 +75,17 @@ Pass the printed absolute path to the monitor's `--log` option.
 
 ## Build status shows ACTIVE for a different project
 
-Process discovery is server-wide. Any visible process named `lean`, `lake`, or `leanc` contributes to ACTIVE status, even if it belongs to another project. `--project` selects the storage filesystem and header directory, not a process filter. The full process table defaults to a three-row window sorted by RSS, with more or fewer rows after resizing the log. Hover over Processes and use the mouse wheel to see the remaining matching processes; the heading shows the visible range and total.
+Process discovery is server-wide. Any visible process named `lean`, `lake`, or `leanc` contributes to ACTIVE status, even if it belongs to another project. `--project` selects the storage filesystem and header directory, not a process filter. Processes automatically expands to show all entries that fit while retaining other panes' minimum heights. With many processes or a manually reduced height, hover over Processes and use the wheel for remaining entries. The heading shows the visible range and total.
+
+## PID, full paths, or command options are missing from Processes
+
+The normal table intentionally shows only `TYPE`, `MEMORY`, and `TARGET`. Click a process row, or press `p`/`Enter` for the first visible row, to open details. Scroll long details with the wheel or arrow keys. Press `Enter`/`Esc` or click outside to close. A process that disappears retains its last captured details with a no-longer-visible label. If target detection or working-directory access fails, its path may be unavailable or relative; full command display remains available when readable.
+
+## Compile estimates are unavailable, learning, or different from Lake jobs
+
+Estimated Lean files are separate from the Lake job counter. The background source/import scan needs a readable Lean project under `--project`; a folder containing no local Lean sources has no file estimate. Time remains `Learning` until recognized source-module completion timings or throughput provide enough samples. Replayed and native jobs do not train Lean compilation time.
+
+Estimates are approximate: custom build directories, generated sources, dynamic target configuration, and Lake's hash/artifact cache can differ from a source/standard-output timestamp estimate. The scope label indicates low confidence or a partial scan. Joining a build midway or reading a bounded tail cannot recover its true start time and all earlier work. Use a fresh, explicitly selected log for each run and the correct project directory; no second build is launched for estimation.
 
 ## Mouse scrolling does not work
 
@@ -93,7 +105,9 @@ Storage is filesystem capacity, not recursive project size. “Free” is user-a
 
 ## Old log lines disappear or long lines are cut off
 
-The monitor intentionally retains only 200 completed lines and a partial line, keeping at most 4096 raw bytes per line. It reads a recent 64 KiB window per refresh and can skip older data during a burst or after a long pause. Read the original log with another tool when you need complete history.
+Retained log text wraps to the panel width. Narrowing the terminal creates additional display rows rather than cutting off the right-hand side. Scroll with the wheel or arrow keys to inspect older parts, including rows within a single long record; `f` returns to the latest output.
+
+The monitor intentionally retains only 200 completed records and a partial record, keeping at most 4096 raw bytes per record. It reads a recent 64 KiB window per refresh and can skip older data during a burst or after a long pause. These ingestion bounds still apply after wrapping. Read the original log with another tool when you need complete history beyond them.
 
 ## Reduce monitoring overhead
 
