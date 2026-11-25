@@ -1,0 +1,424 @@
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+#[derive(Clone, Debug, Default)]
+pub struct Process {
+    pub pid: u32,
+    pub name: String,
+    pub rss: u64,
+    pub command: String,
+}
+
+#[derive(Default)]
+pub struct Snapshot {
+    pub cpu: Option<f64>,
+    pub memory: Option<(u64, u64)>,
+    pub swap: Option<(u64, u64)>,
+    pub disk: Option<(u64, u64, u64)>,
+    pub load: String,
+    pub processes: Vec<Process>,
+    pub warnings: Vec<String>,
+}
+
+pub fn cpu_ticks(text: &str) -> Option<(u64, u64)> {
+    let line = text.lines().next()?;
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .take(8)
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if !line.starts_with("cpu ") || values.len() < 4 {
+        return None;
+    }
+    Some((
+        values.iter().sum(),
+        values[3] + values.get(4).copied().unwrap_or(0),
+    ))
+}
+
+pub fn memory(text: &str, key: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name == key)
+            .then(|| {
+                value
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()?
+                    .checked_mul(1024)
+            })
+            .flatten()
+    })
+}
+
+pub fn processes(proc: &Path) -> std::io::Result<Vec<Process>> {
+    let mut result = Vec::new();
+    for entry in fs::read_dir(proc)?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse() else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(name) = fs::read_to_string(path.join("comm")) else {
+            continue;
+        };
+        let name = name.trim();
+        if !matches!(name, "lean" | "lake" | "leanc") {
+            continue;
+        }
+        let rss = fs::read_to_string(path.join("status"))
+            .ok()
+            .and_then(|text| memory(&text, "VmRSS"))
+            .unwrap_or(0);
+        // Bound command reads, even for unusually large argument lists.
+        let mut args = Vec::new();
+        if let Ok(file) = File::open(path.join("cmdline")) {
+            let _ = file.take(4096).read_to_end(&mut args);
+        }
+        let command = String::from_utf8_lossy(&args)
+            .replace('\0', " ")
+            .trim()
+            .to_string();
+        result.push(Process {
+            pid,
+            name: name.into(),
+            rss,
+            command,
+        });
+    }
+    result.sort_unstable_by_key(|p| std::cmp::Reverse(p.rss));
+    Ok(result)
+}
+
+pub struct Sampler {
+    previous: Option<(u64, u64)>,
+    project: PathBuf,
+    proc: PathBuf,
+}
+
+impl Sampler {
+    pub fn new(project: PathBuf) -> Self {
+        Self {
+            previous: None,
+            project,
+            proc: "/proc".into(),
+        }
+    }
+
+    pub fn sample(&mut self) -> Snapshot {
+        let mut out = Snapshot::default();
+        if let Some(now) = fs::read_to_string(self.proc.join("stat"))
+            .ok()
+            .and_then(|s| cpu_ticks(&s))
+        {
+            if let Some(previous) = self.previous {
+                let total = now.0.saturating_sub(previous.0);
+                let idle = now.1.saturating_sub(previous.1);
+                if total > 0 {
+                    out.cpu = Some(
+                        (100.0 * (total.saturating_sub(idle)) as f64 / total as f64)
+                            .clamp(0.0, 100.0),
+                    );
+                }
+            }
+            self.previous = Some(now);
+        } else {
+            out.warnings
+                .push("System metrics require Linux /proc; use --demo for a preview.".into());
+        }
+        if let Ok(text) = fs::read_to_string(self.proc.join("meminfo")) {
+            out.memory = memory(&text, "MemTotal")
+                .zip(memory(&text, "MemAvailable"))
+                .map(|(total, available)| (total.saturating_sub(available), total));
+            out.swap = memory(&text, "SwapTotal")
+                .zip(memory(&text, "SwapFree"))
+                .map(|(total, free)| (total.saturating_sub(free), total));
+        }
+        out.load = fs::read_to_string(self.proc.join("loadavg"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" / ");
+        match processes(&self.proc) {
+            Ok(p) => out.processes = p,
+            Err(e) => out.warnings.push(format!("Process scan: {e}")),
+        }
+        // `df` is deliberately not spawned on each refresh. Linux mount capacity
+        // comes directly from statvfs; the platform-specific ABI lives below.
+        out.disk = disk_usage(&self.project);
+        if out.disk.is_none() {
+            out.warnings
+                .push("Disk capacity unavailable for project filesystem.".into());
+        }
+        out
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn disk_usage(path: &Path) -> Option<(u64, u64, u64)> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_ulong};
+    use std::os::unix::ffi::OsStrExt;
+    // Linux glibc/musl 64-bit statvfs ABI. Other targets use the safe fallback.
+    #[cfg(target_pointer_width = "64")]
+    {
+        #[repr(C)]
+        struct Statvfs {
+            bsize: c_ulong,
+            frsize: c_ulong,
+            blocks: u64,
+            bfree: u64,
+            bavail: u64,
+            files: u64,
+            ffree: u64,
+            favail: u64,
+            fsid: c_ulong,
+            flag: c_ulong,
+            namemax: c_ulong,
+            spare: [i32; 6],
+        }
+        extern "C" {
+            fn statvfs(path: *const c_char, buf: *mut Statvfs) -> c_int;
+        }
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat = std::mem::MaybeUninit::<Statvfs>::uninit();
+        // SAFETY: CString is NUL-terminated and the correctly sized output is writable.
+        if unsafe { statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: successful statvfs initialized the structure.
+        let stat = unsafe { stat.assume_init() };
+        Some((
+            stat.blocks
+                .saturating_sub(stat.bfree)
+                .saturating_mul(stat.frsize),
+            stat.blocks.saturating_mul(stat.frsize),
+            stat.bavail.saturating_mul(stat.frsize),
+        ))
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disk_usage(_path: &Path) -> Option<(u64, u64, u64)> {
+    None
+}
+
+pub fn clean(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' || (c == '\x1b' && chars.peek() == Some(&'\\')) {
+                            if c == '\x1b' {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if c == '\t' {
+            output.push_str("    ");
+        } else if !c.is_control() {
+            output.push(c);
+        }
+    }
+    output
+}
+
+pub fn progress(line: &str) -> Option<(u64, u64)> {
+    for part in line.split('[').skip(1) {
+        let Some((inside, _)) = part.split_once(']') else {
+            continue;
+        };
+        let Some((done, total)) = inside.split_once('/') else {
+            continue;
+        };
+        if let (Ok(done), Ok(total)) = (done.trim().parse(), total.trim().parse()) {
+            if total > 0 && done <= total {
+                return Some((done, total));
+            }
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+pub struct LogTail {
+    pub path: Option<PathBuf>,
+    pub lines: VecDeque<String>,
+    pub progress: Option<(u64, u64)>,
+    pub updated: Option<Instant>,
+    pub error: Option<String>,
+    pub generation: u64,
+    lines_added: u64,
+    position: u64,
+    identity: Option<(u64, u64)>,
+    pending: Vec<u8>,
+}
+
+impl LogTail {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            ..Self::default()
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        if self.path.is_none() {
+            return;
+        }
+        self.error = self.read().err().map(|e| e.to_string());
+    }
+
+    fn read(&mut self) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(target_os = "linux")]
+        const NONBLOCK: i32 = 0x800;
+        #[cfg(not(target_os = "linux"))]
+        const NONBLOCK: i32 = 0x4;
+        // Do not let an accidental FIFO/device path block sampling or quitting.
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NONBLOCK)
+            .open(self.path.as_ref().unwrap())?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "log must be a regular file",
+            ));
+        }
+        let identity = (metadata.dev(), metadata.ino());
+        let reset = self.identity != Some(identity) || metadata.len() < self.position;
+        if reset {
+            self.generation = self.generation.wrapping_add(1);
+            self.lines.clear();
+            self.pending.clear();
+            self.progress = None;
+            self.updated = None;
+            self.position = 0;
+            self.identity = Some(identity);
+        }
+        let skip_partial = metadata.len().saturating_sub(self.position) > 65536;
+        if skip_partial {
+            self.position = metadata.len() - 65536;
+            self.pending.clear();
+            self.push("... older output skipped (bounded log reader)".into());
+        }
+        file.seek(SeekFrom::Start(self.position))?;
+        let mut bytes = Vec::with_capacity(8192);
+        file.take(65536).read_to_end(&mut bytes)?;
+        self.position += bytes.len() as u64;
+        if !bytes.is_empty() {
+            self.updated = Some(Instant::now());
+        }
+        // Discard a partial first line in memory, rather than issuing one read
+        // syscall per byte when attaching to a large or rapidly growing log.
+        let start = if skip_partial {
+            bytes
+                .iter()
+                .position(|b| *b == b'\n' || *b == b'\r')
+                .map(|i| i + 1)
+                .unwrap_or(bytes.len())
+        } else {
+            0
+        };
+        for byte in bytes.into_iter().skip(start) {
+            if byte == b'\n' || byte == b'\r' {
+                let line = clean(&String::from_utf8_lossy(&self.pending));
+                if let Some(value) = progress(&line) {
+                    self.progress = Some(value);
+                }
+                if !line.trim().is_empty() {
+                    self.push(line);
+                }
+                self.pending.clear();
+            } else if self.pending.len() < 4096 {
+                self.pending.push(byte);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn push(&mut self, line: String) {
+        if self.lines.len() >= 200 {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+        self.lines_added = self.lines_added.saturating_add(1);
+    }
+
+    pub fn cursor(&self) -> u64 {
+        self.lines_added
+            .saturating_add(u64::from(!self.pending.is_empty()))
+    }
+
+    pub fn visible_lines(&self) -> Vec<String> {
+        let mut lines: Vec<_> = self.lines.iter().cloned().collect();
+        if !self.pending.is_empty() {
+            lines.push(clean(&String::from_utf8_lossy(&self.pending)));
+        }
+        lines
+    }
+}
+
+pub fn demo(tick: u64) -> Snapshot {
+    let gib = 1024 * 1024 * 1024;
+    Snapshot {
+        cpu: Some(76.0 + 12.0 * (tick as f64 / 5.0).sin()),
+        memory: Some(((11.6 * gib as f64) as u64, 32 * gib)),
+        swap: Some((0, 4 * gib)),
+        disk: Some((84 * gib, 240 * gib, 156 * gib)),
+        load: "6.42 / 5.81 / 4.29".into(),
+        processes: vec![
+            Process {
+                pid: 28416,
+                name: "lean".into(),
+                rss: (1.8 * gib as f64) as u64,
+                command: "lean RiemannHypothesis/ExplicitFormula.lean".into(),
+            },
+            Process {
+                pid: 28421,
+                name: "lean".into(),
+                rss: (1.2 * gib as f64) as u64,
+                command: "lean RiemannHypothesis/ZetaBounds.lean".into(),
+            },
+            Process {
+                pid: 28390,
+                name: "lake".into(),
+                rss: 84 * 1024 * 1024,
+                command: "lake build".into(),
+            },
+        ],
+        warnings: vec![],
+    }
+}
+
+#[cfg(test)]
+#[path = "monitor_tests.rs"]
+mod tests;

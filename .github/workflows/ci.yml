@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust and tools
+        run: |
+          rustup default stable
+          rustup component add rustfmt clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --offline -- -D warnings
+      - run: cargo test --offline
+      - run: cargo build --release --offline
+      - name: Exercise the real terminal
+        run: python3 tests/terminal_smoke.py target/release/lean-top
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify minimum Rust version
+        run: |
+          rustup toolchain install 1.70.0 --profile minimal
+          cargo +1.70.0 check --offline

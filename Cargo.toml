@@ -1,0 +1,12 @@
+[package]
+name = "lean-top"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A lightweight terminal dashboard for Linux Lean builds"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
