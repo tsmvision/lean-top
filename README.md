@@ -85,6 +85,8 @@ q Quit   Space Pause   ↑↓/jk Scroll   f Follow   ? Help
 
 The full layout needs a terminal of at least **91 columns × 32 rows**. Smaller terminals use a compact layout with resource rows, build status, and logs. Its drawing area needs 52 columns × 20 rows, so use a terminal of at least **53 columns × 20 rows**: one terminal column is reserved to prevent wrapping. The compact layout omits the process table and resource detail rows.
 
+Unchanged log rows stay on screen while resource metrics continue to refresh. The log's last-read time is a fixed UTC timestamp that changes only when new bytes are read, rather than a continuously advancing age counter. Scrolling, help, and terminal resizing can still redraw the affected area.
+
 ## Controls and options
 
 | Key | Action |

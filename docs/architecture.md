@@ -44,7 +44,7 @@ The counters are Lake job observations, not completed source-file counts. Depend
 
 ## Terminal rendering
 
-Frames consist of character/color cells. Only changed rows are emitted using ANSI cursor movement. Interactive mode uses `stty` when entering and leaving raw mode, not during ordinary refreshes. The alternate screen and cursor are restored on normal exit; handlers for hangup, interrupt, and termination request exit through the main loop.
+Frames consist of character/color cells. Only changed rows are emitted using ANSI cursor movement; an identical frame produces no output or flush. Unchanged log rows are left on screen as resource metrics update. The log's last-read indicator uses a fixed UTC wall-clock timestamp captured when bytes arrive, avoiding timer-only repaints. User interactions and terminal resizing still redraw the affected rows. Interactive mode uses `stty` when entering and leaving raw mode, not during ordinary refreshes. The alternate screen and cursor are restored on normal exit; handlers for hangup, interrupt, and termination request exit through the main loop.
 
 One physical terminal column is reserved to avoid automatic wrapping. The full layout uses at least 90 drawing columns × 32 rows, which means a terminal at least 91 columns wide. The compact layout uses at least 52 drawing columns × 20 rows, requiring 53 physical columns. Smaller sizes show a resize message. The render area is capped at 300 drawing columns × 120 rows.
 

@@ -106,7 +106,7 @@ fn demo_log(log: &mut LogTail, tick: u64) {
         log.push(format!(
             "⣾ [{done}/680] Running RiemannHypothesis.ExplicitFormula"
         ));
-        log.updated = Some(Instant::now());
+        log.updated = Some(std::time::SystemTime::now());
     }
 }
 
@@ -202,9 +202,12 @@ fn run(options: Options) -> io::Result<()> {
                 height,
             );
             {
-                let mut stdout = io::stdout().lock();
-                stdout.write_all(frame.ansi_diff(previous.as_ref(), options.color).as_bytes())?;
-                stdout.flush()?;
+                let diff = frame.ansi_diff(previous.as_ref(), options.color);
+                if !diff.is_empty() {
+                    let mut stdout = io::stdout().lock();
+                    stdout.write_all(diff.as_bytes())?;
+                    stdout.flush()?;
+                }
             }
             previous = Some(frame);
             dirty = false;

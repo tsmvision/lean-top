@@ -205,7 +205,9 @@ impl Frame {
                 output.push(cell.ch);
             }
         }
-        output.push_str("\x1b[0m");
+        if !output.is_empty() {
+            output.push_str("\x1b[0m");
+        }
         output
     }
 }
@@ -491,14 +493,23 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                 "none · pass --log /path/to/build.log".into()
             }
         });
-    let age = log
+    let observed = log
         .updated
-        .map(|time| format!("{:.1}s ago", time.elapsed().as_secs_f64()))
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|time| {
+            let seconds = time.as_secs() % 86400;
+            format!(
+                "{:02}:{:02}:{:02} UTC",
+                seconds / 3600,
+                (seconds / 60) % 60,
+                seconds % 60
+            )
+        })
         .unwrap_or_else(|| "waiting".into());
     frame.text(
         2,
         b + 5,
-        &format!("Log: {source} · {age}"),
+        &format!("Log: {source} · last read {observed}"),
         Color::Muted,
         inside,
     );
@@ -698,9 +709,50 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_frame_only_emits_reset() {
+    fn unchanged_frame_emits_nothing() {
         let frame = Frame::new(80, 24);
-        assert_eq!(frame.ansi_diff(Some(&frame), true), "\x1b[0m");
+        assert_eq!(frame.ansi_diff(Some(&frame), true), "");
+        assert_eq!(frame.ansi_diff(Some(&frame), false), "");
+    }
+
+    #[test]
+    fn unchanged_log_does_not_repaint_as_time_passes() {
+        let snapshot = crate::monitor::demo(0);
+        let state = ViewState {
+            follow: true,
+            ..ViewState::default()
+        };
+        let mut log = LogTail::default();
+        log.updated = Some(std::time::SystemTime::now());
+        log.push("✔ [1/2] Built Example".into());
+        let view = View {
+            snapshot: &snapshot,
+            log: &log,
+            state: &state,
+            project: "/srv/riemann",
+            host: "ubuntu",
+            cores: 16,
+            interval_ms: 500,
+        };
+        let before = render(&view, 110, 38);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let after = render(&view, 110, 38);
+        assert_eq!(after.ansi_diff(Some(&before), true), "");
+        let changed_cpu = crate::monitor::demo(1);
+        let refreshed = render(
+            &View {
+                snapshot: &changed_cpu,
+                ..view
+            },
+            110,
+            38,
+        );
+        assert!(!refreshed.ansi_diff(Some(&after), true).is_empty());
+        assert_eq!(
+            refreshed.cells[11 * 110..],
+            after.cells[11 * 110..],
+            "Resource refreshes must leave the unchanged build and log rows alone"
+        );
     }
 
     #[test]

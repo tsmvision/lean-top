@@ -218,7 +218,12 @@ fn log_append_preserves_split_utf8_and_escape_sequences() {
     assert!(log.error.is_none());
     assert!(log.updated.is_some());
     let lines = log.visible_lines();
+    let updated = log.updated;
     log.refresh();
+    assert_eq!(
+        log.updated, updated,
+        "unchanged logs retain their last-read timestamp"
+    );
     assert_eq!(
         log.visible_lines(),
         lines,

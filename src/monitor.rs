@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::SystemTime;
 
 #[derive(Clone, Debug, Default)]
 pub struct Process {
@@ -303,7 +303,7 @@ pub struct LogTail {
     pub path: Option<PathBuf>,
     pub lines: VecDeque<String>,
     pub progress: Option<(u64, u64)>,
-    pub updated: Option<Instant>,
+    pub updated: Option<SystemTime>,
     pub error: Option<String>,
     pub generation: u64,
     lines_added: u64,
@@ -368,7 +368,7 @@ impl LogTail {
         file.take(65536).read_to_end(&mut bytes)?;
         self.position += bytes.len() as u64;
         if !bytes.is_empty() {
-            self.updated = Some(Instant::now());
+            self.updated = Some(SystemTime::now());
         }
         // Discard a partial first line in memory, rather than issuing one read
         // syscall per byte when attaching to a large or rapidly growing log.
