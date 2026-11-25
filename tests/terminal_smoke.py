@@ -275,6 +275,7 @@ def main():
     exercise_wrapping(binary)
     exercise_automatic_module_progress(binary)
     exercise_module_progress(binary)
+    exercise_artifact_progress_without_built_lines(binary)
     exercise_module_progress_restart(binary)
     exercise_log_stability(binary)
     exercise_log_history(binary)
@@ -283,7 +284,7 @@ def main():
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, automatically calculated totals and module counts restored after restart, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, automatically calculated totals, artifact recovery without Built logs, and module counts restored after restart, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
 
 
 def exercise_wrapping(binary):
@@ -382,6 +383,60 @@ def exercise_module_progress(binary):
                 if select.select([master],[],[],0.1)[0]:os.read(master,65536)
             if process.poll() is None:process.kill();process.wait()
             os.close(master);os.close(slave)
+
+
+def exercise_artifact_progress_without_built_lines(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-zero-regression-") as directory:
+        project=Path(directory)
+        (project/"A.lean").write_text("")
+        (project/"B.lean").write_text("")
+        artifacts=project/".lake/build/lib/lean"
+        artifacts.mkdir(parents=True)
+        (artifacts/"A.olean").write_text("compiled")
+        (artifacts/"A.trace").write_text("completed")
+        log=project/"build.log"
+        log.write_text("⣾ [11535/11593] Running B\r",encoding="utf-8")
+        for expected in ["1 / 2", "2 / 2"]:
+            master,slave=os.openpty()
+            fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
+            process=subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
+            captured=bytearray()
+            def expect_ratio(needle):
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline:
+                    if select.select([master],[],[],0.05)[0]:
+                        captured.extend(os.read(master,65536))
+                        if needle in screen_text(captured):return
+                raise AssertionError(f"Missing artifact-based ratio {needle}: {screen_text(captured)}")
+            try:
+                expect_ratio(expected)
+                if expected=="1 / 2":
+                    (artifacts/"B.olean").write_text("new output without any Built log")
+                    (artifacts/"B.trace").write_text("completed")
+                    expect_ratio("2 / 2")
+                    with log.open("a",encoding="utf-8") as output:output.write("✔ [11536/11593] Built B\n")
+                    deadline=time.monotonic()+0.4
+                    while time.monotonic()<deadline:
+                        if select.select([master],[],[],0.05)[0]:captured.extend(os.read(master,65536))
+                    assert "2 / 2" in screen_text(captured), "Artifact and log must count once"
+            finally:
+                os.write(master,b"q")
+                deadline=time.monotonic()+3
+                while process.poll() is None and time.monotonic()<deadline:
+                    if select.select([master],[],[],0.1)[0]:os.read(master,65536)
+                if process.poll() is None:process.kill();process.wait()
+                os.close(master);os.close(slave)
+        # The active package's source and output roots must normalize module names.
+        (project/"lakefile.toml").write_text('name = "paths"\nsrcDir = "src"\nbuildDir = "output"\nleanLibDir = "objects"\n')
+        (project/"src").mkdir()
+        (project/"src/Main.lean").write_text("")
+        output=project/"output/objects"
+        output.mkdir(parents=True)
+        (output/"Main.olean").write_text("compiled")
+        (output/"Main.trace").write_text("completed")
+        log.write_text("⣾ [999/1000] Running Main\r",encoding="utf-8")
+        snapshot=subprocess.check_output([binary,"--project",directory,"--log",str(log),"--snapshot"],timeout=10).decode()
+        assert "1 / 1" in snapshot, snapshot
 
 
 def exercise_log_stability(binary):

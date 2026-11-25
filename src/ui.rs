@@ -1096,7 +1096,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                     duration(left)
                 ),
                 (_, Some(left)) => format!("Est. time ≈ {} remaining", duration(left)),
-                _ if log.path.is_none() && !state.demo => {
+                _ if log.path.is_none() && !state.demo && state.estimate.completed.is_none() => {
                     "Est. time: no build log (set --log)".into()
                 }
                 _ if state.estimate.completed.is_none() => {

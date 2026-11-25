@@ -66,7 +66,7 @@ Capture both output streams in a separate Bash terminal:
 ```bash
 cd /srv/riemann
 set -o pipefail
-lake build 2>&1 | tee build.log
+lake --no-ansi build 2>&1 | tee build.log
 ```
 
 The monitor does not create the log or launch the build. Check that the build is actually emitting output, press `Space` if sampling is paused, and press `f` to return to following the tail.
@@ -75,7 +75,7 @@ If `--log` is omitted, the application chooses the filename-sorted first regular
 
 ## Progress is missing, old, or apparently complete
 
-Build shows distinct successful module completions against a total calculated from project `.lean` filenames once at startup. Its numbers are independent of Lake's `[reported/total]` job fraction. No numeric total is hardcoded or supplied manually. For subset targets or custom source layouts, use `--module-list`/`PROJECT/lean-top.modules`.
+Build shows completed/available module outputs against a total calculated from project `.lean` filenames once at startup. Its numbers are independent of Lake's `[reported/total]` job fraction. No numeric total is hardcoded or supplied manually. For subset targets or custom source layouts, use `--module-list`/`PROJECT/lean-top.modules`.
 
 The calculated/listed total remains fixed during the run. Duplicate completions, native facets, cached/replayed jobs, failed records, and unmatched targets do not add to the numerator. An incomplete inventory or replay reports an error rather than an invented count.
 
@@ -88,7 +88,7 @@ cd /srv/riemann
 set -o pipefail
 log_path="build-$(date -u +%Y%m%dT%H%M%SZ).log"
 printf 'Monitor log: %s/%s\n' "$PWD" "$log_path"
-lake build 2>&1 | tee "$log_path"
+lake --no-ansi build 2>&1 | tee "$log_path"
 ```
 
 Pass the printed absolute path to the monitor's `--log` option.
@@ -180,7 +180,7 @@ Scrolling, terminal resizing, overlays, and automatic pane movement when process
 
 ## Build counts differ after restarting
 
-Startup counts project `.lean` filenames once (or reads a supplied target list) and restores successful `Built` records from the log's beginning. Reopening the same sources/list and log restores the same ratio, even beyond the 200-record display ring and 64 KiB tail. Large inventories and logs can take time; counts remain unknown until initialization completes.
+Startup counts project `.lean` filenames once (or reads a supplied target list), scans ready `.olean`/`.trace` pairs, and restores successful `Built` records from the log's beginning. Reopening the same sources/list and log restores the same ratio, even beyond the 200-record display ring and 64 KiB tail. Large inventories and logs can take time; counts remain unknown until initialization completes.
 
 Sources added/removed, a changed list, a different log, deleted/truncated records, or multiple builds appended to one file can change the reconstructed count. Native facets, cached/replayed jobs, failed records, and non-target modules are excluded. The automatic denominator describes all project modules; for a partial target, a custom source root, or external dependencies use a verified module list.
 
@@ -189,3 +189,17 @@ Sources added/removed, a changed list, a different log, deleted/truncated record
 Automatic discovery excludes hidden directories, `lakefile.lean`, symlink directories, and nonregular sources. Unreadable directories or invalid module paths cause an error rather than a truncated count. The supported maximum is 1,000,000 modules and 2,000,000 directory entries, above a 175,187-module project; no value of 175,187 is built into production defaults.
 
 A list contains dotted names such as `Main` or `Proof.Zeta`, one per line. Blank lines and `#` comments are allowed; paths such as `Proof/Zeta.lean` are not module names. Duplicate names count once. Invalid, oversized, or nonregular lists report an error. The list size limit is 64 MiB. After correcting data, restart to initialize the target set again.
+
+## Build shows zero while log output is visible
+
+Visible Lake job progress does not necessarily include successful `Built` messages. ANSI-mode Lake can omit ordinary successful jobs, and progress is written to stderr. The monitor therefore restores ready `.olean` plus `.trace` pairs as well as successful log records, then watches output changes with Linux inotify. A `.olean` without a trace is not treated as finished. Logs and artifacts for the same module count once. This works with an already running build; do not restart the build just to recover the monitor count.
+
+For a future complete log, capture both streams without forced ANSI formatting:
+
+```sh
+lake --no-ansi build Main 2>&1 | tee build.log
+```
+
+Check the selected source and output roots. The monitor reads literal top-level TOML `srcDir`, `buildDir`, and `leanLibDir`; unsupported dynamic Lean configuration is not evaluated. An unmatched module name appears in the time row as a scope diagnostic. If the log is currently building `Mathlib.*` under `.lake/packages`, project-only progress can legitimately remain zero until the project's own outputs are ready. Those external artifacts are outside the default project output directory.
+
+Existing artifact pairs indicate availability, not validated current source hashes or recompilation during this invocation. Cached/previous outputs may therefore contribute to the baseline. This matches the full fresh-project build premise; use Lake's actual exit status for success and proof verification. Linux watch-limit or queue-overflow errors require attention rather than trusting a silently stale count; non-Linux output scans are limited to once per second.

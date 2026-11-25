@@ -1,4 +1,5 @@
 //! Fixed target totals and replayable, deduplicated Lean-module completions.
+use crate::artifacts::Tracker;
 use crate::monitor::{clean, progress, LogTail};
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
@@ -77,6 +78,7 @@ impl Replay {
     }
 }
 
+#[derive(Default)]
 struct State {
     membership: Option<Membership>,
     total: Option<usize>,
@@ -84,18 +86,67 @@ struct State {
     available: bool,
     replay: Option<Replay>,
     error: Option<String>,
+    artifacts: Option<Tracker>,
+    artifact_error: Option<String>,
+    unmatched: Option<String>,
 }
 
 impl State {
     fn record(&mut self, line: &str) {
         let Some(module) = built_module(line) else {
+            if progress(line).is_some() && self.unmatched.is_none() {
+                if let Some((_, status)) = line.split_once(']') {
+                    let status = status
+                        .trim()
+                        .strip_prefix("(Optional)")
+                        .unwrap_or(status.trim())
+                        .trim();
+                    if let Some(module) = status.split_whitespace().nth(1) {
+                        if valid_module(module)
+                            && self
+                                .membership
+                                .as_ref()
+                                .is_some_and(|members| !members.modules.contains_key(module))
+                        {
+                            self.unmatched = Some(module.to_string());
+                        }
+                    }
+                }
+            }
             return;
         };
         let Some(membership) = &mut self.membership else {
             return;
         };
+        if !membership.modules.contains_key(module) && self.unmatched.is_none() {
+            self.unmatched = Some(module.to_string());
+        }
         if membership.record(module) {
             self.count += 1;
+        }
+    }
+
+    fn artifact(&mut self, module: &str) {
+        if let Some(membership) = &mut self.membership {
+            if !membership.modules.contains_key(module) && self.unmatched.is_none() {
+                self.unmatched = Some(module.to_string());
+            }
+            if membership.record(module) {
+                self.count += 1;
+            }
+        }
+    }
+
+    fn poll_artifacts(&mut self) {
+        let result = self.artifacts.as_mut().map(Tracker::poll);
+        match result {
+            Some(Ok(modules)) => {
+                for module in modules {
+                    self.artifact(&module);
+                }
+            }
+            Some(Err(error)) => self.artifact_error = Some(format!("Artifact tracking: {error}")),
+            None => {}
         }
     }
 
@@ -213,10 +264,12 @@ impl Estimator {
                 .err()
                 .map(|error| format!("Cannot update completed files: {error}"));
         }
+        state.poll_artifacts();
         let caught_up = state
             .replay
             .as_ref()
-            .is_some_and(|r| r.position >= log.position());
+            .map(|r| r.position >= log.position())
+            .unwrap_or(state.available);
         if !caught_up {
             self.samples.clear();
         } else if state.available
@@ -227,9 +280,12 @@ impl Estimator {
             }
             self.samples.push_back((now, state.count));
         }
-        let error = state.error.clone().or_else(|| self.read_error.clone()).or_else(|| {
+        let error = state.error.clone().or_else(|| self.read_error.clone()).or_else(|| state.artifact_error.clone()).or_else(|| (state.total == Some(0)).then(|| "No Lean source modules found; check --project".into())).or_else(|| {
             state.total.filter(|total| state.count > *total)
                 .map(|_| "Completed modules exceed the configured total; check the total and build log".into())
+        }).or_else(|| {
+            if state.count == 0 { state.unmatched.as_ref().map(|module|
+                format!("No project match for {module}; check --project/source layout")) } else { None }
         });
         let rate = self.samples.front().and_then(|&(start, first)| {
             let elapsed = now.saturating_duration_since(start).as_secs_f64();
@@ -286,6 +342,9 @@ fn start_worker(
             available: false,
             replay: None,
             error: None,
+            artifacts: None,
+            artifact_error: None,
+            unmatched: None,
         };
         let membership = match catalog {
             Some(modules) => {
@@ -298,7 +357,7 @@ fn start_worker(
                     Some(count),
                 ))
             }
-            None => load_membership(project, manifest.as_deref()),
+            None => load_membership(project.clone(), manifest.as_deref()),
         };
         match membership {
             Ok((membership, total)) => {
@@ -310,6 +369,18 @@ fn start_worker(
                 let _ = send.send(state);
                 return;
             }
+        }
+        match package_layout(&project)
+            .and_then(|(_, artifacts)| Tracker::new(artifacts).map_err(|error| error.to_string()))
+        {
+            Ok((tracker, modules)) => {
+                state.artifacts = Some(tracker);
+                state.available = true;
+                for module in modules {
+                    state.artifact(&module);
+                }
+            }
+            Err(error) => state.artifact_error = Some(format!("Artifact tracking: {error}")),
         }
         match source {
             Ok(Some(file)) => {
@@ -325,6 +396,7 @@ fn start_worker(
                     }
                 }
             }
+            Ok(None) if state.artifacts.is_some() => {}
             Ok(None) => state.error = Some("No build log selected".into()),
             Err(error) => state.error = Some(format!("Cannot open build log for replay: {error}")),
         }
@@ -352,7 +424,79 @@ fn load_membership(
     ))
 }
 
+fn package_layout(project: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let mut source = PathBuf::from(".");
+    let mut build = PathBuf::from(".lake/build");
+    let mut library = PathBuf::from("lib/lean");
+    // Lean configurations are executable code; never evaluate them here.
+    if !project.join("lakefile.lean").is_file() {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(target_os = "linux")]
+        const NONBLOCK: i32 = 0x800;
+        #[cfg(not(target_os = "linux"))]
+        const NONBLOCK: i32 = 0x4;
+        match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NONBLOCK)
+            .open(project.join("lakefile.toml"))
+        {
+            Ok(file) => {
+                if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+                    return Err("Lake config must be a regular file".into());
+                }
+                let mut text = String::new();
+                file.take(65537)
+                    .read_to_string(&mut text)
+                    .map_err(|e| e.to_string())?;
+                if text.len() > 65536 {
+                    return Err("Lake config exceeds 64 KiB; use a module list".into());
+                }
+                for line in text.lines().map(str::trim) {
+                    if line.starts_with('[') {
+                        break;
+                    }
+                    let Some((key, value)) = line.split_once('=') else {
+                        continue;
+                    };
+                    let target = match key.trim().trim_matches(|c| c == '\'' || c == '"') {
+                        "srcDir" => &mut source,
+                        "buildDir" => &mut build,
+                        "leanLibDir" => &mut library,
+                        _ => continue,
+                    };
+                    let value = value.trim();
+                    let Some(quote @ ('\'' | '"')) = value.chars().next() else {
+                        return Err("Lake paths must be literal strings".into());
+                    };
+                    let Some(end) = value[1..].find(quote) else {
+                        return Err("Unterminated Lake path".into());
+                    };
+                    let path = &value[1..end + 1];
+                    let rest = value[end + 2..].trim();
+                    if path.contains('\\') || (!rest.is_empty() && !rest.starts_with('#')) {
+                        return Err("Unsupported Lake path syntax".into());
+                    }
+                    let path = PathBuf::from(path);
+                    if path.is_absolute()
+                        || path
+                            .components()
+                            .any(|p| matches!(p, std::path::Component::ParentDir))
+                    {
+                        return Err("Lake paths must stay within the project".into());
+                    }
+                    *target = path;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot read Lake paths: {error}")),
+        }
+    }
+    Ok((project.join(source), project.join(build).join(library)))
+}
+
 fn inventory_modules(project: &Path) -> Result<HashMap<String, usize>, String> {
+    let (source, _) = package_layout(project)?;
+    let project = source.as_path();
     if !fs::symlink_metadata(project)
         .map_err(|error| format!("Cannot inspect source directory: {error}"))?
         .is_dir()
@@ -760,6 +904,7 @@ mod tests {
                 pending: Vec::new(),
             }),
             error: None,
+            ..State::default()
         })
         .unwrap();
         let estimate = settle(&mut estimator, &log);
@@ -882,6 +1027,7 @@ mod tests {
                 pending: Vec::new(),
             }),
             error: None,
+            ..State::default()
         });
         let estimate = estimator.refresh(&log);
         assert_eq!((estimate.completed, estimate.files), (Some(3), Some(5)));
@@ -912,6 +1058,7 @@ mod tests {
                 pending: Vec::new(),
             }),
             error: None,
+            ..State::default()
         })
         .unwrap();
         fs::rename(fixture.0.join("build.log"), fixture.0.join("old.log")).unwrap();
@@ -944,15 +1091,70 @@ mod tests {
     }
 
     #[test]
-    fn no_log_is_unknown_rather_than_a_fake_zero() {
+    fn no_log_uses_the_independently_scanned_artifact_baseline() {
         let fixture = Fixture::new();
         fixture.write("A.lean", "");
         fixture.write("B.lean", "");
         let mut estimator = Estimator::new(fixture.0.clone(), None);
         let estimate = settle(&mut estimator, &LogTail::default());
         assert_eq!(estimate.files, Some(2));
-        assert_eq!(estimate.completed, None);
-        assert!(estimate.error.unwrap().contains("No build log"));
+        assert_eq!(estimate.completed, Some(0));
+        assert!(estimate.error.is_none());
+    }
+
+    #[test]
+    fn ansi_progress_without_built_records_recovers_existing_completed_artifacts() {
+        let fixture = Fixture::new();
+        fixture.write("A.lean", "");
+        fixture.write("B.lean", "");
+        fixture.write(".lake/build/lib/lean/A.olean", "output");
+        fixture.write(".lake/build/lib/lean/A.trace", "completed");
+        let path = fixture.write("build.log", "⣾ [11535/11593] Running B\r");
+        let mut log = LogTail::new(Some(path));
+        log.refresh();
+        let mut estimator = Estimator::new(fixture.0.clone(), None);
+        let estimate = settle(&mut estimator, &log);
+        assert_eq!((estimate.completed, estimate.files), (Some(1), Some(2)));
+        fixture.append("build.log", "✔ [11536/11593] Built A\n");
+        log.refresh();
+        assert_eq!(
+            estimator.refresh(&log).completed,
+            Some(1),
+            "Log plus artifact must count only once"
+        );
+        let mut restarted = Estimator::new(fixture.0.clone(), None);
+        assert_eq!(settle(&mut restarted, &log).completed, Some(1));
+    }
+
+    #[test]
+    fn toml_source_and_output_directories_match_lake_module_names() {
+        let fixture = Fixture::new();
+        fixture.write("lakefile.toml", "name = \"fixture\"\nsrcDir = \"src\"\nbuildDir = \"output\"\nleanLibDir = \"objects\"\n");
+        fixture.write("src/Main.lean", "");
+        fixture.write("src/Proof/A.lean", "");
+        fixture.write("Unused.lean", "outside the configured source root");
+        fixture.write("output/objects/Main.olean", "output");
+        fixture.write("output/objects/Main.trace", "completed");
+        let path = fixture.write("build.log", "✔ [1000/2000] Built Proof.A\n");
+        let mut log = LogTail::new(Some(path));
+        log.refresh();
+        let mut estimator = Estimator::new(fixture.0.clone(), None);
+        let estimate = settle(&mut estimator, &log);
+        assert_eq!((estimate.completed, estimate.files), (Some(2), Some(2)));
+        assert!(estimate.error.is_none(), "{:?}", estimate.error);
+    }
+
+    #[test]
+    fn unmatched_dependency_activity_explains_why_project_count_is_zero() {
+        let fixture = Fixture::new();
+        fixture.write("Main.lean", "");
+        let path = fixture.write("build.log", "⣾ [11535/11593] Running Mathlib.Other\r");
+        let mut log = LogTail::new(Some(path));
+        log.refresh();
+        let mut estimator = Estimator::new(fixture.0.clone(), None);
+        let estimate = settle(&mut estimator, &log);
+        assert_eq!(estimate.completed, Some(0));
+        assert!(estimate.error.unwrap().contains("Mathlib.Other"));
     }
 
     #[test]

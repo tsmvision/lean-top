@@ -1,3 +1,4 @@
+mod artifacts;
 mod estimate;
 mod input;
 mod monitor;

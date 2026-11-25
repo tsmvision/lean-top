@@ -1,6 +1,6 @@
 # lean-top
 
-A lightweight terminal dashboard for Lean builds on 64-bit Ubuntu Linux. It shows server resources, inspectable Lean/Lake processes, distinct completed Lean modules against a fixed target total, estimated build times, and wrapping build logs. Mouse wheels navigate individual panels, and dragging section dividers adjusts their heights.
+A lightweight terminal dashboard for Lean builds on 64-bit Ubuntu Linux. It shows server resources, inspectable Lean/Lake processes, completed/available Lean module outputs against a fixed target total, estimated build times, and wrapping build logs. Mouse wheels navigate individual panels, and dragging section dividers adjusts their heights.
 
 Written in Rust with **no Cargo dependencies**. The default refresh interval is **500 ms**. The monitor reads system information and an existing log; it does not launch, stop, or modify your build.
 
@@ -55,7 +55,7 @@ Start the build in one terminal. Use Bash so that `pipefail` preserves a failing
 ```bash
 cd /srv/riemann
 set -o pipefail
-lake build 2>&1 | tee build.log
+lake --no-ansi build 2>&1 | tee build.log
 ```
 
 In another terminal:
@@ -183,9 +183,9 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
 - **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. By default the pane grows to show all entries that fit, reducing optional summary space if necessary while preserving the log minimum. Excess entries remain scrollable when terminal space runs out. Dragging a divider sets a manual height for the session. The heading shows the visible range and total. Processes are live and not filtered by project.
-- **ACTIVE/IDLE** reflects whether any of those processes were detected. **Build** displays distinct successfully compiled target modules divided by a total calculated once from module data. It does not use Lake's job index or require a numeric total argument.
+- **ACTIVE/IDLE** reflects whether any of those processes were detected. **Build** displays distinct completed/available target module outputs divided by a total calculated once from module data. It does not use Lake's job index or require a numeric total argument.
 
-**Automatic counting:** on startup, a background worker walks `--project` once and records the module names represented by `.lean` filenames. It does not read source contents, parse imports, read `.olean` artifacts, or run Lake. Hidden directories (including `.lake` and `.git`), `lakefile.lean`, symlink directories, and nonregular sources are excluded. Visible source directories are included. The number of unique discovered modules becomes the denominator and remains fixed during that run. Source or list edits require restarting the application; the catalog is reused across log rotation. The total is not hardcoded; a 175,187-module tree is supported without the old 20,000-module cap.
+**Automatic counting:** on startup, a background worker walks `--project` once and records the module names represented by `.lean` filenames. It does not read source contents, parse imports, or run Lake. Literal top-level `srcDir`, `buildDir`, and `leanLibDir` in `lakefile.toml` normalize source names and output paths; executable Lean configurations are not evaluated. Hidden directories (including `.lake` and `.git`), `lakefile.lean`, symlink directories, and nonregular sources are excluded. Visible source directories are included. The number of unique discovered modules becomes the denominator and remains fixed during that run. Source or list edits require restarting the application; the catalog is reused across log rotation. The total is not hardcoded; a 175,187-module tree is supported without the old 20,000-module cap.
 
 ```sh
 lean-top --project /srv/riemann --log /srv/riemann/build.log
@@ -201,7 +201,11 @@ RiemannHypothesis.ExplicitFormula
 
 The example is a three-module list; use your complete actual list. Save it as `lean-top.modules` in the project for automatic selection, or pass `--module-list /path/to/modules.txt`. One dotted module name per line is accepted, with blank lines and `#` comments. The denominator is calculated from unique entries; repeated names do not inflate it. No manually supplied numeric denominator is used. Lists and inventory support up to 1,000,000 modules; directory walks inspect at most 2,000,000 entries and lists are limited to 64 MiB. Invalid names, unreadable directories, or limits report an error rather than a truncated, misleading total.
 
-**Restart-safe completion count:** startup streams the selected log from its beginning in a background worker. Only successful `Built Module.Name` records in the calculated/listed scope count, once per module. Native `:c.o` facets, `Replayed`/`Reused` work, running jobs, diagnostics, failed records, and non-target modules do not count. The worker hands its file position and unfinished record to the live reader, which consumes at most 64 KiB of new bytes per refresh without losing completions from the 200-record display ring. Restarting with the same sources/list and build log restores the same count. No checkpoint or duplicate log file is written.
+**Restart-safe completion count:** startup checks the configured output directory for matching `.olean` plus `.trace` pairs and streams the selected log from its beginning. Successful `Built Module.Name` records and ready artifact pairs are merged by module, once per module. This restores existing output even when ANSI-mode Lake logs omit ordinary successful job messages. Native `:c.o` facets, `Replayed`/`Reused` log records, running jobs, diagnostics, failed records, and non-target modules do not directly increment the count. Existing cached outputs can be included by the artifact baseline. The worker hands its file position and unfinished record to the live reader, which consumes at most 64 KiB of new bytes per refresh without losing completions from the 200-record display ring. Restarting with the same sources/list, artifacts, and log restores the same count. A `.olean` without its completion trace does not establish readiness. No checkpoint or duplicate log file is written. Artifact-only progress can work without a log, though a complete captured log remains useful for diagnostics.
+
+On Ubuntu, inotify watches output directories for completed writes and atomic moves, including newly created directories. A new ready pair updates the count without rescanning all project modules; log and file events for the same module are deduplicated. The non-Linux development fallback scans output directories at most once per second. Watch-limit or event-queue errors are reported explicitly.
+
+Artifact existence does not validate Lake hashes or prove recompilation in the current invocation: old or cached pairs may already exist. The ratio is available/completed module-output progress. It agrees with compiled-file progress for the full fresh build assumed here; an incremental build requires that distinction. Failed builds still require checking Lake's exit status.
 
 Use one log per build. Appending multiple runs to one file combines their distinct compiled modules; deleted or overwritten completion records cannot be recovered. Detected rotation/truncation resets the run and initializes the new file. An incomplete inventory or replay is shown as an error, not a fabricated count. For an incremental build, the whole project's module total is not necessarily the number that will actually compile; choose the scope appropriate to the build you are measuring.
 
@@ -213,7 +217,7 @@ Lake's `[reported/total]` numbers can include native and cache jobs and may grow
 
 The monitor reads `/proc` and filesystem metadata directly instead of spawning `top`, `ps`, or `df` on every refresh. It sleeps between updates and redraws changed terminal rows. Log ingestion is bounded to a recent 64 KiB window per refresh, with 200 completed lines retained and a 4 KiB raw-byte limit per line, plus a partial line. Live ingestion may skip older output to keep up, but scrolling can retrieve it while it remains in the original file. The scrollback cache retains at most 4096 records and 256 KiB of text plus record metadata; it loads pages only during navigation. Detected rotation or truncation returns the view to the current log.
 
-The monitor makes no network requests and does not persist metrics, logs, or configuration. Source filenames or a target list are read once and completion history is replayed once at startup; there is no recurring source-tree or artifact-directory walk. Module names map to indexed completion bits rather than duplicate completed-name strings. Build-log writes in the example come from `tee`. Actual CPU and memory costs depend on process count, log volume, terminal size, and refresh interval; no fixed overhead budget is guaranteed.
+The monitor makes no network requests and does not persist metrics, logs, or configuration. Source filenames or a target list are read once, artifacts are scanned initially, and available log history is replayed once at startup. Linux uses bounded inotify reads thereafter instead of recurring whole-tree scans; newly discovered output directories are scanned when watched. Module names map to indexed completion bits rather than duplicate completed-name strings. Build-log writes in the example come from `tee`. Actual CPU and memory costs depend on process count, log volume, terminal size, and refresh interval; no fixed overhead budget is guaranteed.
 
 ## Development
 
