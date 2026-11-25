@@ -948,8 +948,8 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                     " · approx.".into()
                 };
                 format!(
-                    "Initial Lean files ≈ {total} · done {} · additional {}{scope}",
-                    state.estimate.completed, state.estimate.additional
+                    "Initial Lean files ≈ {total} · done {}{scope}",
+                    state.estimate.completed
                 )
             })
             .unwrap_or_else(|| {
@@ -963,12 +963,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     }
     if let Some(total) = state.estimate.files {
         let completed = state.estimate.completed.min(total);
-        let extra = if state.estimate.additional > 0 {
-            format!(" +{} extra", state.estimate.additional)
-        } else {
-            String::new()
-        };
-        let label = format!("{completed} / {total} files (fixed){extra}");
+        let label = format!("{completed} / {total} files");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
             2,
@@ -1293,7 +1288,6 @@ mod tests {
                     estimate: Estimate {
                         files: Some(120),
                         completed: 34,
-                        additional: 0,
                         total_seconds: Some(180.0),
                         remaining_seconds: Some(129.0),
                         scope: "test".into(),
@@ -1377,7 +1371,6 @@ mod tests {
             estimate: Estimate {
                 files: Some(120),
                 completed: 34,
-                additional: 0,
                 total_seconds: Some(180.0),
                 remaining_seconds: Some(129.0),
                 scope: "local estimate".into(),
@@ -1399,7 +1392,9 @@ mod tests {
         )
         .plain();
         assert!(text.contains("Initial Lean files ≈ 120 · done 34"));
-        assert!(text.contains("34 / 120 files (fixed)"));
+        assert!(text.contains("34 / 120 files"));
+        assert!(!text.contains("extra"));
+        assert!(!text.contains("additional"));
         assert!(text.contains("Lake jobs: 342/680"));
         assert!(text.contains("3m 0s total · ≈ 2m 9s left"));
         let before = render(

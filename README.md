@@ -97,8 +97,8 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
 
 BUILD
 ● ACTIVE    6 Lean/Lake processes · server-wide
-Initial Lean files ≈ 120 · done 34 · additional 0 · demo estimate
-████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       34 / 120 files (fixed)
+Initial Lean files ≈ 120 · done 34 · demo estimate
+████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       34 / 120 files
 Est. time ≈ 3m 0s total · ≈ 2m 9s left
 Log: simulated build.log · last read 12:34:56 UTC
 Lake jobs: 342/680 · ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
@@ -187,7 +187,7 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 
 Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).
 
-**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen before its first numeric display for the observed run. Later known compiler targets and completions outside that set are counted as `additional`, without changing the file denominator. Recognized source-module `Built` events update completion counts. Time estimates start from the first recognized module duration as a rough estimate, then prefer live completion throughput when available. If no time can be calculated, the row states whether the build log or timing data is missing. No second Lake build or per-refresh source-tree scan is launched.
+**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen before its first numeric display for the observed run. Later known compiler targets and completions outside that set are tracked internally for time estimation, without changing the file denominator. No extra-file counter is displayed. Recognized source-module `Built` events update completion counts. Time estimates start from the first recognized module duration as a rough estimate, then prefer live completion throughput when available. If no time can be calculated, the row states whether the build log or timing data is missing. No second Lake build or per-refresh source-tree scan is launched.
 
 All predictions use `≈` and a confidence/scope label. They are not Lake's exact build plan: dynamic/custom target configuration, generated modules, cache layout, and hash-based dependency decisions can change actual work. The scan uses a local/import fallback rather than executing `lakefile.lean`. The displayed total time estimates the analyzed Lean compilation work from the monitor's observation window, not a recovered start time for a build you joined midway, and it excludes unrelated native/link jobs. See [Lake's module build decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
 

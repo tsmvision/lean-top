@@ -15,7 +15,6 @@ const HEADER_BYTES: u64 = 16_384;
 pub struct Estimate {
     pub files: Option<usize>,
     pub completed: usize,
-    pub additional: usize,
     pub remaining_seconds: Option<f64>,
     pub total_seconds: Option<f64>,
     pub scope: String,
@@ -274,7 +273,6 @@ impl Estimator {
         Estimate {
             files: Some(files),
             completed,
-            additional: self.additional.len(),
             remaining_seconds: if remaining == 0 {
                 Some(0.0)
             } else {
@@ -902,7 +900,11 @@ mod tests {
         let expanded =
             estimator.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(4));
         assert_eq!(
-            (expanded.files, expanded.completed, expanded.additional),
+            (
+                expanded.files,
+                expanded.completed,
+                estimator.additional.len()
+            ),
             (Some(2), 2, 1)
         );
     }
@@ -924,7 +926,7 @@ mod tests {
         log.push("✔ [8/900] Built C (2s)".into());
         let extra = estimator.refresh_at(&log, &snapshot, now + Duration::from_secs(1));
         assert_eq!(
-            (extra.files, extra.completed, extra.additional),
+            (extra.files, extra.completed, estimator.additional.len()),
             (Some(2), 0, 1)
         );
         log.push("✔ [9/9000] Built A (2s)".into());
@@ -932,7 +934,11 @@ mod tests {
         log.push("✔ [11/99999] Built C (2s)".into());
         let finished = estimator.refresh_at(&log, &snapshot, now + Duration::from_secs(3));
         assert_eq!(
-            (finished.files, finished.completed, finished.additional),
+            (
+                finished.files,
+                finished.completed,
+                estimator.additional.len()
+            ),
             (Some(2), 2, 1)
         );
     }
