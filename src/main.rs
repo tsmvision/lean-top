@@ -21,6 +21,7 @@ Usage: lean-top [OPTIONS]
 Options:
   --project PATH      Project directory (default: current directory)
   --log PATH          Build log (default: first filename-sorted ~/logs/*.log)
+  --module-list PATH  Fixed target modules, one name per line (auto: lean-top.modules)
   --interval-ms MS    Refresh interval, 100–60000 ms (default: 500)
   --demo              Show simulated metrics and build output
   --snapshot          Print one plain-text frame and exit (110 x 38)
@@ -39,6 +40,7 @@ The monitor only reads; run lake build separately and capture its output.
 struct Options {
     project: PathBuf,
     log: Option<PathBuf>,
+    module_list: Option<PathBuf>,
     interval: Duration,
     demo: bool,
     snapshot: bool,
@@ -66,6 +68,7 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
     let mut options = Options {
         project: env::current_dir().map_err(|e| e.to_string())?,
         log: None,
+        module_list: None,
         interval: Duration::from_millis(500),
         demo: false,
         snapshot: false,
@@ -76,6 +79,10 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
         match arg.as_str() {
             "--project" => options.project = args.next().ok_or("--project requires a path")?.into(),
             "--log" => options.log = Some(args.next().ok_or("--log requires a path")?.into()),
+            "--module-list" => {
+                options.module_list =
+                    Some(args.next().ok_or("--module-list requires a path")?.into())
+            }
             "--interval-ms" => {
                 let ms = args
                     .next()
@@ -111,6 +118,20 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, St
     if options.demo && options.log.is_some() {
         return Err("--demo cannot be combined with --log".into());
     }
+    if options.demo && options.module_list.is_some() {
+        return Err("--demo cannot be combined with --module-list".into());
+    }
+    if !options.demo && options.module_list.is_none() {
+        let manifest = options.project.join("lean-top.modules");
+        if manifest.is_file() {
+            options.module_list = Some(manifest);
+        }
+    }
+    if let Some(manifest) = &options.module_list {
+        if !manifest.is_file() {
+            return Err("--module-list must name an existing regular file".into());
+        }
+    }
     if !options.demo && options.log.is_none() {
         options.log = env::var_os("HOME")
             .filter(|home| !home.is_empty())
@@ -145,16 +166,19 @@ fn demo_log(log: &mut LogTail, tick: u64) {
 }
 
 fn demo_estimate(tick: u64) -> Estimate {
-    let reported = 342 + (tick / 3) % 300;
+    let completed = (34 + tick as usize / 6).min(120);
     Estimate {
+        files: Some(120),
+        completed: Some(completed),
         total_seconds: Some(180.0),
-        remaining_seconds: Some((680 - reported) as f64 / 680.0 * 180.0),
+        remaining_seconds: Some((120 - completed) as f64 * 1.5),
+        error: None,
     }
 }
 
 fn run(options: Options) -> io::Result<()> {
     let mut sampler = Sampler::new(options.project.clone());
-    let mut estimator = Estimator::default();
+    let mut estimator = Estimator::new(options.project.clone(), options.module_list.clone());
     let mut log = LogTail::new(options.log.clone());
     let mut state = ViewState {
         follow: true,
@@ -418,6 +442,22 @@ mod tests {
         }
         assert!(options(vec!["--interval-ms".into()]).is_err());
         assert!(options(vec!["--unknown".into()]).is_err());
+    }
+
+    #[test]
+    fn target_list_options_require_valid_paths_and_reject_demo_inputs() {
+        assert!(options(vec!["--module-list".into()]).is_err());
+        assert!(options(vec![
+            "--module-list".into(),
+            "/nonexistent/lean-top-modules".into()
+        ])
+        .is_err());
+        assert!(options(vec![
+            "--demo".into(),
+            "--module-list".into(),
+            "modules.txt".into()
+        ])
+        .is_err());
     }
 
     #[test]

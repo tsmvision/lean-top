@@ -237,7 +237,7 @@ def main():
     binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/release/lean-top").resolve())
     plain = subprocess.check_output([binary, "--demo", "--snapshot"])
     assert b"\x1b" not in plain
-    assert b"342 / 680" in plain
+    assert b"34 / 120" in plain
     assert b"Latest:" in plain
     assert b"Initial Lean files" not in plain and b"Est. time" in plain
     bad = subprocess.run([binary, "--interval-ms", "99"], capture_output=True)
@@ -268,13 +268,14 @@ def main():
             encoding="utf-8",
         )
         observed = subprocess.check_output([binary, "--snapshot", "--log", str(log_path)], timeout=5)
-        assert b"2 / 20" in observed, "Build must use Lake counters directly"
+        assert b"2 / 20" not in observed, "Lake jobs must not become a file count"
         assert b"2 / 20 files" not in observed
     for key in (b"q", b"\x03", None):
         exercise(binary, key)
     exercise_wrapping(binary)
-    exercise_lake_progress(binary)
-    exercise_lake_progress_restart(binary)
+    exercise_automatic_module_progress(binary)
+    exercise_module_progress(binary)
+    exercise_module_progress_restart(binary)
     exercise_log_stability(binary)
     exercise_log_history(binary)
     if sys.platform.startswith("linux"):
@@ -282,7 +283,7 @@ def main():
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, Lake counters after restart, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, process details, auto process height, wrapped logs, file-backed scrollback, automatically calculated totals and module counts restored after restart, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
 
 
 def exercise_wrapping(binary):
@@ -318,41 +319,68 @@ def exercise_wrapping(binary):
             os.close(master);os.close(slave)
 
 
-def exercise_lake_progress(binary):
-    with tempfile.TemporaryDirectory(prefix="lean-top-lake-progress-") as directory:
+def exercise_automatic_module_progress(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-auto-total-") as directory:
+        project=Path(directory)
+        for filename in ["Main.lean","A.lean","B.lean","Proof/C.lean","node_modules/Visible.lean"]:
+            path=project / filename
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(b"contents are not read by module inventory\xff")
+        for filename in ["lakefile.lean",".lake/packages/Dependency.lean",".git/Hidden.lean"]:
+            path=project / filename
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text("ignored configuration/dependency")
+        log=project / "build.log"
+        log.write_text("✔ [16000/20000] Built A (1s)\n",encoding="utf-8")
+        args=[binary,"--project",directory,"--log",str(log),"--snapshot"]
+        first=subprocess.check_output(args,timeout=10).decode()
+        assert "1 / 5" in first, first
+        restarted=subprocess.check_output(args,timeout=10).decode()
+        assert "1 / 5" in restarted, restarted
+        (project / "Added.lean").write_text("a new source changes the next computed total")
+        updated=subprocess.check_output(args,timeout=10).decode()
+        assert "1 / 6" in updated, updated
+        with log.open("a",encoding="utf-8") as output:
+            output.write("✔ [17000/50000] Built A (1s)\n✔ [17001/50000] Built A:c.o (1s)\n✔ [17002/50000] Replayed Proof.C (1s)\n✔ [17003/50000] Built B (1s)\n")
+        completed=subprocess.check_output(args,timeout=10).decode()
+        assert "2 / 6" in completed, completed
+
+
+def exercise_module_progress(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-modules-") as directory:
         project = Path(directory)
+        manifest = project / "lean-top.modules"
+        manifest.write_text("Project.A\nProject.B\nProject.C\nProject.A\n")
         log = project / "build.log"
-        log.write_text("✔ [16000/20000] Built External.Module (1s)\n", encoding="utf-8")
-        master, slave = os.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH",38,111,0,0))
+        log.write_text("✔ [16000/20000] Built Project.A (1s)\n", encoding="utf-8")
+        master,slave = os.openpty()
+        fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
         process = subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
-        captured = bytearray()
+        captured=bytearray()
         def expect_ratio(needle):
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                if select.select([master], [], [], 0.1)[0]:
-                    captured.extend(os.read(master, 65536))
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                if select.select([master],[],[],0.1)[0]:
+                    captured.extend(os.read(master,65536))
                     if needle in screen_text(captured):
                         return
-            raise AssertionError(f"Missing Lake ratio {needle}: {screen_text(captured)}")
+            raise AssertionError(f"Missing module ratio {needle}: {screen_text(captured)}")
         try:
-            expect_ratio("16000 / 20000")
-            with log.open("a", encoding="utf-8") as output:
-                output.write("⣾ [16010/30000] Running External.Other\r")
-            expect_ratio("16010 / 30000")
-            with log.open("a", encoding="utf-8") as output:
-                output.write("warning: diagnostic fraction [999/1000]\n⣷ [17000/50000] Running External.Next")
-            expect_ratio("17000 / 50000")
+            expect_ratio("1 / 3")
+            with log.open("a",encoding="utf-8") as output:
+                output.write("✔ [16010/30000] Built Project.B (2s)\n✔ [16011/30000] Built Project.B (2s)\n✔ [16012/30000] Built Project.B:c.o (1s)\n✔ [16013/30000] Replayed Project.C (1s)\n✔ [16014/30000] Built app (1s)\n")
+            expect_ratio("2 / 3")
+            with log.open("a",encoding="utf-8") as output:
+                output.write("✔ [17000/50000] Built Project.C (3s)\n")
+            expect_ratio("3 / 3")
             assert all(value not in screen_text(captured) for value in ("fixed", "extra", "additional", "Initial Lean files"))
-            assert list(project.iterdir()) == [log], "Reading Lake counters must not create source/build/cache files"
+            assert set(project.iterdir()) == {manifest,log}, "Counting must not create source/build/cache files"
         finally:
             os.write(master,b"q")
-            deadline = time.monotonic()+3
+            deadline=time.monotonic()+3
             while process.poll() is None and time.monotonic()<deadline:
-                if select.select([master],[],[],0.1)[0]:
-                    os.read(master,65536)
-            if process.poll() is None:
-                process.kill();process.wait()
+                if select.select([master],[],[],0.1)[0]:os.read(master,65536)
+            if process.poll() is None:process.kill();process.wait()
             os.close(master);os.close(slave)
 
 
@@ -436,38 +464,35 @@ def exercise_log_history(binary):
             os.close(slave)
 
 
-def exercise_lake_progress_restart(binary):
-    with tempfile.TemporaryDirectory(prefix="lean-top-lake-restart-") as directory:
-        project = Path(directory)
-        log = project / "build.log"
-        log.write_text("".join(f"✔ [{16000+i}/50000] Built Module{i} {'retained history ' * 15}(1s)\n" for i in range(300)), encoding="utf-8")
-        assert log.stat().st_size > 65536
-        for reported in (16299, 16299, 16300):
-            if reported == 16300:
-                with log.open("a", encoding="utf-8") as output:
-                    output.write("✔ [16300/50000] Built AnotherModule (1s)\n")
-            master,slave = os.openpty()
+def exercise_module_progress_restart(binary):
+    with tempfile.TemporaryDirectory(prefix="lean-top-module-restart-") as directory:
+        project=Path(directory)
+        manifest=project / "lean-top.modules"
+        manifest.write_text("".join(f"Project.M{i:06}\n" for i in range(175187)))
+        log=project / "build.log"
+        log.write_text("".join(f"✔ [{16000+i}/50000] Built Project.M{i:06} {'retained history ' * 15}(1s)\n" for i in range(300)),encoding="utf-8")
+        assert log.stat().st_size>65536
+        for completed in (300,300,301):
+            if completed==301:
+                with log.open("a",encoding="utf-8") as output:output.write("✔ [16300/50000] Built Project.M000300 (1s)\n")
+            master,slave=os.openpty()
             fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
-            process = subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
-            captured = bytearray()
+            process=subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
+            captured=bytearray()
             try:
-                deadline = time.monotonic()+5
+                deadline=time.monotonic()+10
                 while time.monotonic()<deadline:
                     if select.select([master],[],[],0.1)[0]:
                         captured.extend(os.read(master,65536))
-                        if f"{reported} / 50000" in screen_text(captured):
-                            break
-                else:
-                    raise AssertionError(f"Restart did not preserve Lake's {reported}/50000")
-                assert list(project.iterdir()) == [log]
+                        if f"{completed} / 175187" in screen_text(captured):break
+                else:raise AssertionError(f"Restart did not restore {completed}/175187")
+                assert set(project.iterdir())=={manifest,log}
             finally:
                 os.write(master,b"q")
                 deadline=time.monotonic()+3
                 while process.poll() is None and time.monotonic()<deadline:
-                    if select.select([master],[],[],0.1)[0]:
-                        os.read(master,65536)
-                if process.poll() is None:
-                    process.kill();process.wait()
+                    if select.select([master],[],[],0.1)[0]:os.read(master,65536)
+                if process.poll() is None:process.kill();process.wait()
                 os.close(master);os.close(slave)
 
 

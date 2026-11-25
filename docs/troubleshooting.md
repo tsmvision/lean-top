@@ -75,9 +75,9 @@ If `--log` is omitted, the application chooses the filename-sorted first regular
 
 ## Progress is missing, old, or apparently complete
 
-Build uses the latest recognized Lake `[reported/total]` pair directly for both the counter and progress bar. A status such as `✔ [16000/20000] Built Foo` displays `16000 / 20000`; `⣾ [16010/30000] Running Foo` changes it to `16010 / 30000`. No source-file counting, `+1`, frozen denominator, or extra-file adjustment is performed.
+Build shows distinct successful module completions against a total calculated from project `.lean` filenames once at startup. Its numbers are independent of Lake's `[reported/total]` job fraction. No numeric total is hardcoded or supplied manually. For subset targets or custom source layouts, use `--module-list`/`PROJECT/lean-top.modules`.
 
-These are Lake job observations, which can include more than Lean source compilation. Their denominator can grow as Lake discovers work. If the recent log tail contains no recognized pair, Build displays `— / —` until a status arrives.
+The calculated/listed total remains fixed during the run. Duplicate completions, native facets, cached/replayed jobs, failed records, and unmatched targets do not add to the numerator. An incomplete inventory or replay reports an error rather than an invented count.
 
 Progress is read from log text and can outlive the build process. It does not indicate an exit code, successful proof checking, absence of `sorry`, or validity of the Riemann hypothesis proof. Use the build's actual exit status and your Lean verification workflow for those conclusions.
 
@@ -105,13 +105,13 @@ While details are open, arrows and `j`/`k` scroll the dialog instead of logs, an
 
 ## Estimated time is waiting or changes
 
-Time is calculated from changes in Lake's reported counter, using at most 32 observations. Two distinct counter values and at least one second of monitoring are needed. If no log is selected, the row says `no build log (set --log)`; otherwise it waits for Lake progress or progress updates. Existing module durations are not converted into a made-up per-file speed.
+The monitor first restores completion history in a background worker. It then needs a new unique completion and at least one second of elapsed live observation to measure compilation speed. Re-reading historical output does not manufacture a rate. The total is calculated automatically; inventory errors should be corrected, or a complete target list can be supplied. Without a build log, select the actual log path. Any target-list or replay error appears in the time row.
 
-Both total and remaining time are approximate. They can change when jobs slow down, parallelism changes, or Lake discovers a larger denominator. The speed resets when the counter decreases or the log rotates/truncates. Restarting also resets time observations, while the displayed Build counts still come directly from Lake. No source tree, import graph, `.olean` artifact, or cache directory is scanned.
+Total and remaining time are approximate, based on at most 32 observations of new completed modules. Parallelism and varying module costs can change the forecast. Restarting restores the completion count but restarts speed observations. Only the initial filename inventory is needed; no recurring source/import/artifact scan is performed.
 
 ## Some processes or estimate fields are not visible
 
-Automatic process height attempts to show the complete matching list, but it cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the automatic viewport. Restart to restore the default allocation. Build reserves four rows so status, Lake progress, and the estimated total/remaining time remain visible even when crowded or manually shrunk. The Build counter shows only `reported / total`, with no `files`, `fixed`, or `extra` suffix and no duplicate file-summary row. Expanding Build reveals log-source information and latest-event text. The process table remains unavailable in compact mode.
+Automatic process height attempts to show the complete matching list, but it cannot exceed physical terminal space while preserving other panes' minimums. Use the process range in the heading and scroll for additional entries, or enlarge the terminal. After you drag a divider, that manual height is retained for the session; it overrides the automatic viewport. Restart to restore the default allocation. Build reserves four rows so status, Lake progress, and the estimated total/remaining time remain visible even when crowded or manually shrunk. The Build counter shows only `completed / total`, with no `files`, `fixed`, or `extra` suffix and no duplicate file-summary row. Expanding Build reveals log-source information and latest-event text. The process table remains unavailable in compact mode.
 
 ## Mouse scrolling does not work
 
@@ -180,4 +180,12 @@ Scrolling, terminal resizing, overlays, and automatic pane movement when process
 
 ## Build counts differ after restarting
 
-The application does not maintain a separate compiled-file counter. It reads Lake's latest recognized `[reported/total]` from the selected log's recent 64 KiB. Restarting with the same unchanged log tail restores the same pair. If a different file was selected, the log was rotated/truncated, or the tail has no recognized progress, the displayed pair can differ or remain unknown. An unrelated diagnostic fraction is ignored. Source modules and `.olean` files do not affect the counter.
+Startup counts project `.lean` filenames once (or reads a supplied target list) and restores successful `Built` records from the log's beginning. Reopening the same sources/list and log restores the same ratio, even beyond the 200-record display ring and 64 KiB tail. Large inventories and logs can take time; counts remain unknown until initialization completes.
+
+Sources added/removed, a changed list, a different log, deleted/truncated records, or multiple builds appended to one file can change the reconstructed count. Native facets, cached/replayed jobs, failed records, and non-target modules are excluded. The automatic denominator describes all project modules; for a partial target, a custom source root, or external dependencies use a verified module list.
+
+## Target inventory or module list is rejected
+
+Automatic discovery excludes hidden directories, `lakefile.lean`, symlink directories, and nonregular sources. Unreadable directories or invalid module paths cause an error rather than a truncated count. The supported maximum is 1,000,000 modules and 2,000,000 directory entries, above a 175,187-module project; no value of 175,187 is built into production defaults.
+
+A list contains dotted names such as `Main` or `Proof.Zeta`, one per line. Blank lines and `#` comments are allowed; paths such as `Proof/Zeta.lean` are not module names. Duplicate names count once. Invalid, oversized, or nonregular lists report an error. The list size limit is 64 MiB. After correcting data, restart to initialize the target set again.

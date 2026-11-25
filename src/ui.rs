@@ -1039,7 +1039,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         w - 17,
     );
     let progress_y = b + 2;
-    if let Some((completed, total)) = log.current_progress() {
+    if let (Some(completed), Some(total)) = (state.estimate.completed, state.estimate.files) {
         let label = format!("{completed} / {total}");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
@@ -1062,24 +1062,49 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             (w - 2).saturating_sub(x),
         );
     } else {
-        frame.text(2, progress_y, "— / —", Color::Muted, inside);
+        let done = state
+            .estimate
+            .completed
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "—".into());
+        let total = state
+            .estimate
+            .files
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "—".into());
+        frame.text(
+            2,
+            progress_y,
+            &format!("{done} / {total}"),
+            Color::Muted,
+            inside,
+        );
     }
     let lines = log.visible_lines();
     let latest = lines.iter().rev().find(|line| progress(line).is_some());
     if progress_y + 1 < layout.build.end {
-        let time = match (
-            state.estimate.total_seconds,
-            state.estimate.remaining_seconds,
-        ) {
-            (Some(total), Some(left)) => format!(
-                "Est. time ≈ {} total · ≈ {} left",
-                duration(total),
-                duration(left)
-            ),
-            (_, Some(left)) => format!("Est. time ≈ {} remaining", duration(left)),
-            _ if log.path.is_none() && !state.demo => "Est. time: no build log (set --log)".into(),
-            _ if log.current_progress().is_none() => "Est. time: waiting for Lake progress".into(),
-            _ => "Est. time: waiting for Lake progress updates".into(),
+        let time = if let Some(error) = &state.estimate.error {
+            format!("Build data: {error}")
+        } else {
+            match (
+                state.estimate.total_seconds,
+                state.estimate.remaining_seconds,
+            ) {
+                (Some(total), Some(left)) => format!(
+                    "Est. time ≈ {} total · ≈ {} left",
+                    duration(total),
+                    duration(left)
+                ),
+                (_, Some(left)) => format!("Est. time ≈ {} remaining", duration(left)),
+                _ if log.path.is_none() && !state.demo => {
+                    "Est. time: no build log (set --log)".into()
+                }
+                _ if state.estimate.completed.is_none() => {
+                    "Est. time: restoring build history".into()
+                }
+                _ if state.estimate.files.is_none() => "Est. time: restoring target list".into(),
+                _ => "Est. time: waiting for new completions".into(),
+            }
         };
         frame.text(2, progress_y + 1, &time, Color::Text, inside);
     }
@@ -1443,6 +1468,7 @@ mod tests {
                     estimate: Estimate {
                         total_seconds: Some(180.0),
                         remaining_seconds: Some(129.0),
+                        ..Estimate::default()
                     },
                     ..ViewState::default()
                 };
@@ -1492,7 +1518,7 @@ mod tests {
                     height
                 )
                 .plain()
-                .contains("Est. time: waiting for Lake progress"));
+                .contains("Est. time: restoring build history"));
             }
         }
     }
@@ -1515,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn build_ratio_uses_lake_counts_directly_including_growing_totals() {
+    fn build_ratio_uses_deduplicated_module_count_and_calculated_total() {
         let snapshot = crate::monitor::demo(0);
         let mut log = LogTail::default();
         log.progress = Some((342, 680));
@@ -1523,6 +1549,9 @@ mod tests {
             estimate: Estimate {
                 total_seconds: Some(180.0),
                 remaining_seconds: Some(129.0),
+                completed: Some(34),
+                files: Some(120),
+                error: None,
             },
             ..ViewState::default()
         };
@@ -1541,8 +1570,8 @@ mod tests {
         )
         .plain();
         assert!(!text.contains("Initial Lean files"));
-        assert!(text.contains("342 / 680"));
-        assert!(!text.contains("34 / 120"));
+        assert!(text.contains("34 / 120"));
+        assert!(!text.contains("342 / 680"));
         assert!(!text.contains("120 files"));
         assert!(!text.contains("fixed"));
         assert!(!text.contains("extra"));
@@ -1576,11 +1605,11 @@ mod tests {
             110,
             38,
         );
-        assert!(after.plain().contains("600 / 9000"));
-        assert_ne!(
+        assert!(after.plain().contains("34 / 120"));
+        assert_eq!(
             before.cells[13 * 110..14 * 110],
             after.cells[13 * 110..14 * 110],
-            "The main progress bar must follow Lake's reported counts"
+            "The main progress bar must not use Lake's job denominator"
         );
     }
 
