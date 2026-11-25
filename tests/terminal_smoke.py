@@ -206,8 +206,9 @@ def main():
     binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/release/lean-top").resolve())
     plain = subprocess.check_output([binary, "--demo", "--snapshot"])
     assert b"\x1b" not in plain
-    assert b"342 / 680" in plain
-    assert b"Est. Lean files" in plain and b"Est. time" in plain
+    assert b"34 / 120 files (fixed)" in plain
+    assert b"Lake jobs: 342/680" in plain
+    assert b"Initial Lean files" in plain and b"Est. time" in plain
     bad = subprocess.run([binary, "--interval-ms", "99"], capture_output=True)
     assert bad.returncode != 0
     non_tty = subprocess.run([binary, "--demo"], capture_output=True)
@@ -236,7 +237,8 @@ def main():
             encoding="utf-8",
         )
         observed = subprocess.check_output([binary, "--snapshot", "--log", str(log_path)], timeout=5)
-        assert b"2 / 20 jobs" in observed, "Use Lake's changing job total, including pending spinner output"
+        assert b"Lake jobs: 2/20" in observed, "Lake counters are reference-only metadata"
+        assert b"2 / 20 files" not in observed
     for key in (b"q", b"\x03", None):
         exercise(binary, key)
     exercise_wrapping(binary)
@@ -287,8 +289,13 @@ def exercise_estimates(binary):
         project = Path(directory)
         for module in "ABC":
             (project / f"{module}.lean").write_text(f"def {module.lower()} := 0\n")
+        (project / "D.lean").write_text("def d := 0\n")
+        artifacts = project / ".lake/build/lib/lean"
+        artifacts.mkdir(parents=True)
+        (artifacts / "D.olean").write_text("cached")
         log = project / "build.log"
         log.write_text("✔ [1/10] Built A (1s)\n✔ [2/10] Built B (2s)\n✔ [3/10] Built C (3s)\n",encoding="utf-8")
+        original_paths = {path.relative_to(project) for path in project.rglob("*")}
         master,slave = os.openpty()
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",38,111,0,0))
         process = subprocess.Popen([binary,"--project",directory,"--log",str(log),"--interval-ms","100"],stdin=slave,stdout=slave,stderr=slave)
@@ -302,17 +309,20 @@ def exercise_estimates(binary):
                         return bytes(data)
             raise AssertionError(f"Missing estimate evidence {needles!r}: {data[-1500:]!r}")
         try:
-            expect_all(["Est. Lean files ≈ 3 · done 0".encode(),b"6s total",b"6s left"])
+            expect_all(["Initial Lean files ≈ 3 · done 0".encode(),b"0 / 3 files (fixed)",b"6s total",b"6s left"])
             with log.open("a",encoding="utf-8") as output:
                 output.write("✔ [4/10] Built A (1s)\n")
-            expect_all(["Est. Lean files ≈ 3 · done 1".encode()])
+            expect_all(["Initial Lean files ≈ 3 · done 1".encode(),b"1 / 3 files (fixed)"])
+            with log.open("a",encoding="utf-8") as output:
+                output.write("✔ [5/50000] Built D (1s)\n")
+            expect_all(["Initial Lean files ≈ 3 · done 1 · additional 1".encode(),b"1 / 3 files (fixed) +1 extra"])
             os.write(master,b"q")
             deadline = time.monotonic()+5
             while process.poll() is None and time.monotonic()<deadline:
                 if select.select([master],[],[],0.1)[0]:
                     os.read(master,65536)
             assert process.poll()==0
-            assert sorted(path.name for path in project.iterdir()) == ["A.lean","B.lean","C.lean","build.log"], "Estimation must not write artifacts"
+            assert {path.relative_to(project) for path in project.rglob("*")} == original_paths, "Estimation must not write artifacts"
         finally:
             if process.poll() is None:
                 process.kill();process.wait()

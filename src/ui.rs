@@ -932,8 +932,8 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                     " · approx.".into()
                 };
                 format!(
-                    "Est. Lean files ≈ {total} · done {}{scope}",
-                    state.estimate.completed
+                    "Initial Lean files ≈ {total} · done {} · additional {}{scope}",
+                    state.estimate.completed, state.estimate.additional
                 )
             })
             .unwrap_or_else(|| {
@@ -945,14 +945,24 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             });
         frame.text(2, b + 2, &files, Color::Muted, inside);
     }
-    if let Some((reported, total)) = log.current_progress() {
-        let label = format!("{reported} / {total} jobs");
+    if let Some(total) = state.estimate.files {
+        let completed = state.estimate.completed.min(total);
+        let extra = if state.estimate.additional > 0 {
+            format!(" +{} extra", state.estimate.additional)
+        } else {
+            String::new()
+        };
+        let label = format!("{completed} / {total} files (fixed){extra}");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
             2,
             progress_y,
             bar_width,
-            reported as f64 / total as f64 * 100.0,
+            if total == 0 {
+                0.0
+            } else {
+                completed as f64 / total as f64 * 100.0
+            },
             Color::Cyan,
         );
         let x = if bar_width == 0 { 2 } else { 4 + bar_width };
@@ -967,7 +977,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         frame.text(
             2,
             progress_y,
-            "Lake jobs unknown · waiting for build status output",
+            "File total unavailable · waiting for source analysis",
             Color::Muted,
             inside,
         );
@@ -1033,7 +1043,10 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             2,
             progress_y + 3,
             &format!(
-                "Latest event   {}",
+                "Lake jobs: {} · {}",
+                log.current_progress()
+                    .map(|(done, total)| format!("{done}/{total}"))
+                    .unwrap_or_else(|| "unknown".into()),
                 latest.map(|s| s.as_str()).unwrap_or("—")
             ),
             Color::Muted,
@@ -1276,6 +1289,7 @@ mod tests {
             estimate: Estimate {
                 files: Some(120),
                 completed: 34,
+                additional: 0,
                 total_seconds: Some(180.0),
                 remaining_seconds: Some(129.0),
                 scope: "local estimate".into(),
@@ -1296,9 +1310,42 @@ mod tests {
             38,
         )
         .plain();
-        assert!(text.contains("Est. Lean files ≈ 120 · done 34"));
-        assert!(text.contains("342 / 680 jobs"));
+        assert!(text.contains("Initial Lean files ≈ 120 · done 34"));
+        assert!(text.contains("34 / 120 files (fixed)"));
+        assert!(text.contains("Lake jobs: 342/680"));
         assert!(text.contains("3m 0s total · ≈ 2m 9s left"));
+        let before = render(
+            &View {
+                snapshot: &snapshot,
+                log: &log,
+                state: &state,
+                project: "/srv/riemann",
+                host: "ubuntu",
+                cores: 16,
+                interval_ms: 500,
+            },
+            110,
+            38,
+        );
+        log.progress = Some((600, 9000));
+        let after = render(
+            &View {
+                snapshot: &snapshot,
+                log: &log,
+                state: &state,
+                project: "/srv/riemann",
+                host: "ubuntu",
+                cores: 16,
+                interval_ms: 500,
+            },
+            110,
+            38,
+        );
+        assert_eq!(
+            before.cells[14 * 110..15 * 110],
+            after.cells[14 * 110..15 * 110],
+            "The main progress bar must not depend on Lake's job counts"
+        );
     }
 
     #[test]

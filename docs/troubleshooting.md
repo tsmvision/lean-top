@@ -75,9 +75,9 @@ If `--log` is omitted, the application chooses the filename-sorted first regular
 
 ## Progress is missing, old, or apparently complete
 
-The progress bar requires a recognized Lake status record such as `✔ [3/8] Built Foo` or `⣾ [3/8] Running Foo`. A complete status prefix can update the display before a newline arrives. Arbitrary `[n/m]` text in diagnostics does not update the counter. “Latest event” is a recent retained Lake status record; it does not identify the only file currently compiling.
+The main progress bar is the completed portion of the fixed initial Lean-file estimate. Its denominator stays unchanged during the same detected build run. The `additional` value reports known files discovered after that baseline; they do not enlarge the denominator. A full initial-file bar does not mean additional work or the whole build has finished.
 
-The displayed numbers count Lake jobs, not `.lean` files. A source file may generate several jobs, cached/replayed work can be reported, and dependency discovery can increase the total during a build. Do not compare the denominator to a recursive source-file count or assume it is fixed. Before the first recognized status record arrives, the count is unknown. The monitor does not launch a second build or scan the source tree to invent a file total.
+The separate `Lake jobs:` reference reads recognized status records such as `✔ [3/8] Built Foo` or `⣾ [3/8] Running Foo`. Its counters may grow as Lake discovers jobs. They include non-Lean work and never supply the file progress bar. If source analysis cannot produce a file estimate, the bar reports unavailable instead of falling back to Lake numbers.
 
 Progress is read from log text and can outlive the build process. It does not indicate an exit code, successful proof checking, absence of `sorry`, or validity of the Riemann hypothesis proof. Use the build's actual exit status and your Lean verification workflow for those conclusions.
 
@@ -107,7 +107,7 @@ While details are open, arrows and `j`/`k` scroll the dialog instead of logs, an
 
 Estimated Lean files are separate from the Lake job counter. The background source/import scan needs a readable Lean project under `--project`; a folder containing no local Lean sources has no file estimate. Time remains `Learning` until recognized source-module completion timings or throughput provide enough samples. Replayed and native jobs do not train Lean compilation time.
 
-`Scanning` means the background analysis has not returned yet; `Unavailable` means it could not supply a useful source estimate. Cold timing data remains `Learning`; the monitor does not substitute a fixed seconds-per-file constant. An apparently surprising zero can mean standard artifacts look current; observed compilation can subsequently expand the estimate. The `done` count excludes old log history used only for calibration, so it need not equal every module that completed before monitoring began.
+`Scanning` means the background analysis has not returned yet; `Unavailable` means it could not supply a useful source estimate. Cold timing data remains `Learning`; the monitor does not substitute a fixed seconds-per-file constant. An apparently surprising zero can mean standard artifacts look current; later known compilation is shown under additional work without increasing that fixed initial file count. The `done` count excludes old log history used only for calibration, so it need not equal every module that completed before monitoring began.
 
 Estimates are approximate: custom build directories, generated sources, dynamic target configuration, and Lake's hash/artifact cache can differ from a source/standard-output timestamp estimate. The scope label indicates low confidence or a partial scan. Joining a build midway or reading a bounded tail cannot recover its true start time and all earlier work. Use a fresh, explicitly selected log for each run and the correct project directory; no second build is launched for estimation.
 

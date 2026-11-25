@@ -149,6 +149,7 @@ fn demo_estimate(tick: u64) -> Estimate {
     Estimate {
         files: Some(120),
         completed,
+        additional: 0,
         total_seconds: Some(180.0),
         remaining_seconds: Some((120 - completed) as f64 * 1.5),
         scope: "demo estimate".into(),

@@ -15,6 +15,7 @@ const HEADER_BYTES: u64 = 16_384;
 pub struct Estimate {
     pub files: Option<usize>,
     pub completed: usize,
+    pub additional: usize,
     pub remaining_seconds: Option<f64>,
     pub total_seconds: Option<f64>,
     pub scope: String,
@@ -52,6 +53,8 @@ pub struct Estimator {
     display_cursor: Option<u64>,
     updated: Option<SystemTime>,
     completed: HashSet<String>,
+    additional: HashSet<String>,
+    frozen: bool,
     timings: VecDeque<f64>,
     observations: VecDeque<(Instant, usize)>,
 }
@@ -70,6 +73,8 @@ impl Estimator {
             display_cursor: None,
             updated: None,
             completed: HashSet::new(),
+            additional: HashSet::new(),
+            frozen: false,
             timings: VecDeque::new(),
             observations: VecDeque::new(),
         }
@@ -91,6 +96,8 @@ impl Estimator {
             self.display_cursor = None;
             self.updated = None;
             self.completed.clear();
+            self.additional.clear();
+            self.frozen = false;
             self.observations.clear();
             if self.receiver.is_some() {
                 self.restart = true;
@@ -145,9 +152,14 @@ impl Estimator {
                 .as_ref()
                 .and_then(|target| plan.paths.get(Path::new(target)))
             {
-                plan.pending.insert(module.clone());
+                if !self.frozen {
+                    plan.pending.insert(module.clone());
+                } else if !plan.pending.contains(module) {
+                    self.additional.insert(module.clone());
+                }
             }
         }
+        self.frozen = true;
         if self.seen.is_none()
             || self.updated != log.updated
             || self.display_cursor != Some(log.cursor())
@@ -189,7 +201,9 @@ impl Estimator {
             if sequence > previous.or(self.baseline).unwrap_or(cursor)
                 && self.completed.insert(module.to_string())
             {
-                plan.pending.insert(module.to_string());
+                if !plan.pending.contains(module) {
+                    self.additional.insert(module.to_string());
+                }
                 if self.observations.len() == 32 {
                     self.observations.pop_front();
                 }
@@ -210,8 +224,18 @@ impl Estimator {
             };
         }
         let files = plan.pending.len();
-        let completed = self.completed.len().min(files);
-        let remaining = files.saturating_sub(completed);
+        let completed = self
+            .completed
+            .iter()
+            .filter(|module| plan.pending.contains(*module))
+            .count();
+        let remaining = files.saturating_sub(completed)
+            + self
+                .additional
+                .iter()
+                .filter(|module| !self.completed.contains(*module))
+                .count();
+        let work = files.saturating_add(self.additional.len());
         let observed_rate = self
             .observations
             .front()
@@ -250,15 +274,16 @@ impl Estimator {
         Estimate {
             files: Some(files),
             completed,
+            additional: self.additional.len(),
             remaining_seconds: if remaining == 0 {
                 Some(0.0)
             } else {
                 rate.map(|r| remaining as f64 / r)
             },
-            total_seconds: if files == 0 {
+            total_seconds: if work == 0 {
                 Some(0.0)
             } else {
-                rate.map(|r| files as f64 / r)
+                rate.map(|r| work as f64 / r)
             },
             scope: plan.scope.clone(),
         }
@@ -718,6 +743,8 @@ mod tests {
             display_cursor: None,
             updated: None,
             completed: HashSet::new(),
+            additional: HashSet::new(),
+            frozen: false,
             timings: VecDeque::new(),
             observations: VecDeque::new(),
         }
@@ -849,7 +876,40 @@ mod tests {
         log.push("✔ [6/8] Built C (2s)".into());
         let expanded =
             estimator.refresh_at(&log, &Snapshot::default(), now + Duration::from_secs(4));
-        assert_eq!((expanded.files, expanded.completed), (Some(3), 3));
+        assert_eq!(
+            (expanded.files, expanded.completed, expanded.additional),
+            (Some(2), 2, 1)
+        );
+    }
+
+    #[test]
+    fn fixed_total_does_not_grow_from_lake_totals_active_processes_or_extra_completions() {
+        let mut estimator = estimator(plan());
+        let mut log = LogTail::default();
+        let now = Instant::now();
+        let initial = estimator.refresh_at(&log, &Snapshot::default(), now);
+        assert_eq!(initial.files, Some(2));
+        let mut snapshot = Snapshot::default();
+        snapshot.processes.push(crate::monitor::Process {
+            pid: 42,
+            name: "lean".into(),
+            target: Some("/project/C.lean".into()),
+            ..crate::monitor::Process::default()
+        });
+        log.push("✔ [8/900] Built C (2s)".into());
+        let extra = estimator.refresh_at(&log, &snapshot, now + Duration::from_secs(1));
+        assert_eq!(
+            (extra.files, extra.completed, extra.additional),
+            (Some(2), 0, 1)
+        );
+        log.push("✔ [9/9000] Built A (2s)".into());
+        log.push("✔ [10/99999] Built B (2s)".into());
+        log.push("✔ [11/99999] Built C (2s)".into());
+        let finished = estimator.refresh_at(&log, &snapshot, now + Duration::from_secs(3));
+        assert_eq!(
+            (finished.files, finished.completed, finished.additional),
+            (Some(2), 2, 1)
+        );
     }
 
     #[test]

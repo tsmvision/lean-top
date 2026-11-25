@@ -97,11 +97,11 @@ Load 6.42 / 5.81 / 4.29  Available 20.4 GiB            Free 156.0 GiB
 
 BUILD
 ● ACTIVE    6 Lean/Lake processes · server-wide
-Est. Lean files ≈ 120 · done 34 · demo estimate
-████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       342 / 680 jobs
+Initial Lean files ≈ 120 · done 34 · additional 0 · demo estimate
+████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░       34 / 120 files (fixed)
 Est. time ≈ 3m 0s total · ≈ 2m 9s left
 Log: simulated build.log · last read 12:34:56 UTC
-Latest event   ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
+Lake jobs: 342/680 · ⣾ [342/680] Running RiemannHypothesis.ExplicitFormula
 
 PROCESSES · 1-6 / 6
 TYPE     MEMORY       TARGET
@@ -183,15 +183,15 @@ lean-top --project /srv/riemann --log /srv/riemann/build.log --interval-ms 2000
 - **Memory** is `MemTotal - MemAvailable`, so reclaimable memory is treated as available. Process memory is resident memory (RSS).
 - **Storage** is capacity on the filesystem containing `--project`, not the size of the project directory. “Free” means space available to the current user and can differ from total minus used because of reserved blocks.
 - **Processes** include server-wide processes named `lean`, `lake`, or `leanc`, sorted by RSS. By default the pane grows to show all entries that fit, reducing optional summary space if necessary while preserving the log minimum. Excess entries remain scrollable when terminal space runs out. Dragging a divider sets a manual height for the session. The heading shows the visible range and total. Processes are live and not filtered by project.
-- **ACTIVE/IDLE** reflects whether any of those processes were detected. **Lake jobs** preserves the latest `[reported/total]` pair from a recognized Lake status record, including a running spinner before its trailing newline. “Latest event” shows a recent retained Lake status record.
+- **ACTIVE/IDLE** reflects whether any of those processes were detected. **The main progress bar** uses completed files from the initial estimated set divided by its fixed file total. **Lake jobs** is a separate reference line preserving Lake's latest `[reported/total]` pair; it never drives the file bar.
 
 Lake counts build jobs, not `.lean` source files. One module can produce several jobs (including native-code facets), and cached or replayed work also contributes to Lake's reporting. Its total can grow as dependency jobs are discovered, so the displayed fraction can decrease while the build advances. The monitor preserves Lake's reported numbers without adding one, counting source files, or fixing the denominator. Before a status record arrives, the job count remains unknown. These semantics follow [Lake's build runner](https://github.com/leanprover/lean4/blob/v4.33.1/src/lake/Lake/Build/Run.lean#L53-L164).
 
-**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen for the observed run and can expand if real compilations contradict it. Recognized source-module `Built` events update completion counts. Time estimates learn from observed completion throughput and reported module timings; cold starts show `Learning` until samples exist. No second Lake build or per-refresh source-tree scan is launched.
+**Estimated Lean compilation files and time:** one bounded background scan inventories local sources and reachable imports, checks source/standard `.olean` timestamps, and conservatively propagates stale dependencies to their importers. The initial set is frozen before its first numeric display for the observed run. Later known compiler targets and completions outside that set are counted as `additional`, without changing the file denominator. Recognized source-module `Built` events update completion counts. Time estimates learn from observed completion throughput and reported module timings; cold starts show `Learning` until samples exist. No second Lake build or per-refresh source-tree scan is launched.
 
 All predictions use `≈` and a confidence/scope label. They are not Lake's exact build plan: dynamic/custom target configuration, generated modules, cache layout, and hash-based dependency decisions can change actual work. The scan uses a local/import fallback rather than executing `lakefile.lean`. The displayed total time estimates the analyzed Lean compilation work from the monitor's observation window, not a recovered start time for a build you joined midway, and it excludes unrelated native/link jobs. See [Lake's module build decisions](https://github.com/leanprover/lean4/blob/master/src/lake/Lake/Build/Module.lean#L1193-L1248).
 
-The `done` value counts distinct recognized source-module completions observed after the monitor's baseline. Initial log history can seed timing estimates, but is not counted as new work completed during this session. Source analysis, `Scanning`, `Unavailable`, and timing `Learning` are different states; a missing estimate is never replaced with the Lake job denominator. Detected log rotation/truncation starts a new analysis, while same-inode truncate-and-regrow between samples can remain undetected.
+The `done` value counts distinct recognized source-module completions from the fixed initial set observed after the monitor's baseline. Additional known files are tracked separately; a full bar means the initial set completed, not that all extra work or the Lake build finished. Time forecasts include discovered additional work and may still change. Initial log history can seed timing estimates, but is not counted as new work completed during this session. Source analysis, `Scanning`, `Unavailable`, and timing `Learning` are different states; a missing estimate is never replaced with the Lake job denominator. Detected log rotation/truncation starts a new analysis, while same-inode truncate-and-regrow between samples can remain undetected.
 
 Log progress can belong to an earlier run and does not supply a build exit code. A full progress bar does not establish a successful build or a valid theorem proof. This tool does not inspect Lean declarations, axioms, `sorry`, or proof artifacts.
 
