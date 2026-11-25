@@ -93,7 +93,7 @@ Unchanged log rows stay on screen while resource metrics continue to refresh. Th
 | --- | --- |
 | Mouse wheel over Processes | Scroll that process list up/down; full layout only |
 | Mouse wheel over Build Log | Scroll older/newer retained log lines |
-| Left-drag the Build Log header | Resize its height within the available space |
+| Left-drag a section divider | Resize the sections immediately above and below it |
 | `q` or `Ctrl-C` | Quit the monitor; the separate build continues |
 | `Space` | Pause/resume metric sampling and log reading |
 | `↑` / `k` | Scroll toward older retained log lines |
@@ -103,7 +103,15 @@ Unchanged log rows stay on screen while resource metrics continue to refresh. Th
 
 Hover over the panel you want to scroll; clicking to focus is unnecessary. The two panels keep independent positions. Process scrolling leaves log following unchanged. Log scrolling disables automatic following; press `f` to return to the live tail. Mouse scrolling also works while sampling is paused and is ignored while help is open. It requires a terminal that forwards XTerm-compatible mouse reports. The log's existing keyboard controls remain available.
 
-To resize the log, hold the left mouse button on its top divider (the row labeled `BUILD LOG`) and drag up or down. In the full layout, the Processes panel uses the remaining space. The application keeps at least one process row and three log rows visible. Compact mode keeps the resource and build summaries fixed and lets you shrink or expand logs within the remaining space. The chosen height is retained for the current session and clamped when the terminal becomes smaller. Resizing keeps the log's scroll position and follow mode.
+Hold the left mouse button on a section divider and drag up or down. Each divider redistributes space between the two adjacent sections:
+
+| Divider | Sections resized |
+| --- | --- |
+| `BUILD` | Resources above it and Build below it |
+| `PROCESSES` | Build above it and Processes below it |
+| `BUILD LOG` | Processes above it and Build Log below it; in compact mode, Build and Build Log |
+
+CPU, Memory, and Storage share one resource row and resize together. Only the application header and footer remain fixed. Minimum heights preserve resource values/bars, build status/progress, at least one process row with table headings, and three log rows. Optional resource details and build captions appear only when their section has room. Narrow layouts can also reveal load, swap, and available/free space by expanding Resources. Heights are retained for the current session and clamped to fit smaller terminals. Resizing preserves log scroll/follow state and adjusts process scroll bounds to the new viewport.
 
 | Option | Meaning |
 | --- | --- |

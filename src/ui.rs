@@ -6,31 +6,46 @@ use std::ops::Range;
 
 /// The renderer and mouse hit testing share the exact same panel boundaries.
 struct Layout {
-    build_y: usize,
+    resources: Range<usize>,
+    build: Range<usize>,
     processes: Option<Range<usize>>,
     log: Option<Range<usize>>,
 }
 
 impl Layout {
-    fn new(width: usize, height: usize, log_height: Option<usize>) -> Self {
+    fn new(width: usize, height: usize, requested: Option<[usize; 3]>) -> Self {
         if width < 52 || height < 20 {
             return Self {
-                build_y: 0,
+                resources: 0..0,
+                build: 0..0,
                 processes: None,
                 log: None,
             };
         }
         let full = width >= 90 && height >= 32;
-        let build_y = if full { 11 } else { 7 };
-        let minimum_y = build_y + if full { 11 } else { 6 };
-        let default_y = build_y + if full { 13 } else { 6 };
-        let log_y = log_height
-            .map(|rows| height.saturating_sub(3).saturating_sub(rows))
-            .unwrap_or(default_y)
-            .clamp(minimum_y, height - 6);
+        let minimum = [3, 3, if full { 3 } else { 0 }];
+        let requested = requested.unwrap_or(if full { [7, 7, 6] } else { [3, 6, 0] });
+        let mut heights = minimum;
+        // Reserve the fixed header/footer and at least three log content rows.
+        // Allocate from the top so preferences also fit smaller terminals.
+        let mut remaining = height - 10 - minimum.iter().sum::<usize>();
+        for index in 0..3 {
+            if index == 2 && !full {
+                continue;
+            }
+            let extra = requested[index]
+                .saturating_sub(minimum[index])
+                .min(remaining);
+            heights[index] += extra;
+            remaining -= extra;
+        }
+        let build_y = 4 + heights[0];
+        let process_y = build_y + heights[1];
+        let log_y = process_y + heights[2];
         Self {
-            build_y,
-            processes: full.then_some(build_y + 7..log_y),
+            resources: 4..build_y,
+            build: build_y..process_y,
+            processes: full.then_some(process_y..log_y),
             log: Some(log_y..height - 2),
         }
     }
@@ -38,8 +53,28 @@ impl Layout {
     fn process_rows(&self) -> usize {
         self.processes
             .as_ref()
-            .map(|range| range.len().saturating_sub(3))
+            .map(|range| range.len().saturating_sub(3).max(1))
             .unwrap_or(0)
+    }
+
+    fn adjacent(&self, divider: usize) -> Option<(Range<usize>, Range<usize>)> {
+        self.log.as_ref()?;
+        match divider {
+            0 => Some((self.resources.clone(), self.build.clone())),
+            1 => Some((
+                self.build.clone(),
+                self.processes.as_ref().or(self.log.as_ref())?.clone(),
+            )),
+            2 => Some((self.processes.as_ref()?.clone(), self.log.as_ref()?.clone())),
+            _ => None,
+        }
+    }
+
+    fn divider_at(&self, row: usize) -> Option<usize> {
+        (0..3).find(|index| {
+            self.adjacent(*index)
+                .is_some_and(|(_, lower)| lower.start == row)
+        })
     }
 }
 
@@ -291,8 +326,8 @@ pub struct ViewState {
     pub follow: bool,
     pub offset: usize,
     pub process_offset: usize,
-    pub log_height: Option<usize>,
-    pub dragging_log: bool,
+    pub pane_heights: Option<[usize; 3]>,
+    pub dragging_divider: Option<(usize, bool)>,
     pub help: bool,
     pub history: VecDeque<f64>,
     pub demo: bool,
@@ -320,7 +355,7 @@ impl ViewState {
     }
 
     pub fn clamp_processes(&mut self, count: usize, size: (usize, usize)) {
-        let rows = Layout::new(size.0, size.1, self.log_height).process_rows();
+        let rows = Layout::new(size.0, size.1, self.pane_heights).process_rows();
         self.process_offset = self.process_offset.min(count.saturating_sub(rows.max(1)));
     }
 
@@ -333,27 +368,54 @@ impl ViewState {
         snapshot: &Snapshot,
     ) -> bool {
         let (width, height) = size;
-        let layout = Layout::new(width, height, self.log_height);
+        let layout = Layout::new(width, height, self.pane_heights);
         if self.help || layout.log.is_none() {
-            return std::mem::replace(&mut self.dragging_log, false);
+            return self.dragging_divider.take().is_some();
         }
         match kind {
             MouseKind::Press => {
-                let active =
-                    column > 0 && column < width - 1 && row == layout.log.as_ref().unwrap().start;
-                let previous = std::mem::replace(&mut self.dragging_log, active);
+                let active = if column > 0 && column < width - 1 {
+                    layout
+                        .divider_at(row)
+                        .map(|index| (index, layout.processes.is_some()))
+                } else {
+                    None
+                };
+                let previous = std::mem::replace(&mut self.dragging_divider, active);
                 previous != active
             }
-            MouseKind::Drag if self.dragging_log => {
-                let minimum_y = layout.build_y + if layout.processes.is_some() { 11 } else { 6 };
-                let divider = row.clamp(minimum_y, height - 6);
-                let requested = Some(height - 3 - divider);
-                let changed = self.log_height != requested;
-                self.log_height = requested;
+            MouseKind::Drag if self.dragging_divider.is_some() => {
+                let (index, full) = self.dragging_divider.unwrap();
+                if full != layout.processes.is_some() {
+                    self.dragging_divider = None;
+                    return true;
+                }
+                let (upper, lower) = layout.adjacent(index).unwrap();
+                let lower_minimum = if lower.start == layout.log.as_ref().unwrap().start {
+                    4
+                } else {
+                    3
+                };
+                let divider = row.clamp(upper.start + 3, lower.end - lower_minimum);
+                let mut requested = [
+                    layout.resources.len(),
+                    layout.build.len(),
+                    layout
+                        .processes
+                        .as_ref()
+                        .map(Range::len)
+                        .unwrap_or_else(|| self.pane_heights.map(|h| h[2]).unwrap_or(6)),
+                ];
+                requested[index] = divider - upper.start;
+                if index + 1 < 3 && !(index == 1 && !full) {
+                    requested[index + 1] = lower.end - divider;
+                }
+                let changed = self.pane_heights != Some(requested);
+                self.pane_heights = Some(requested);
                 self.clamp_processes(snapshot.processes.len(), size);
                 changed
             }
-            MouseKind::Release => std::mem::replace(&mut self.dragging_log, false),
+            MouseKind::Release => self.dragging_divider.take().is_some(),
             _ => false,
         }
     }
@@ -368,10 +430,14 @@ impl ViewState {
         log: &LogTail,
     ) -> bool {
         let (width, height) = size;
-        if self.help || self.dragging_log || column == 0 || column >= width.saturating_sub(1) {
+        if self.help
+            || self.dragging_divider.is_some()
+            || column == 0
+            || column >= width.saturating_sub(1)
+        {
             return false;
         }
-        let layout = Layout::new(width, height, self.log_height);
+        let layout = Layout::new(width, height, self.pane_heights);
         if layout
             .processes
             .as_ref()
@@ -416,7 +482,7 @@ pub struct View<'a> {
 
 pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     let mut frame = Frame::new(width, height);
-    let layout = Layout::new(width, height, view.state.log_height);
+    let layout = Layout::new(width, height, view.state.pane_heights);
     if layout.log.is_none() {
         frame.text(1, 1, "LEAN TOP", Color::Cyan, width.saturating_sub(2));
         frame.text(
@@ -478,6 +544,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
 
     let full = layout.processes.is_some();
     if full {
+        let resource_y = layout.resources.start + usize::from(layout.resources.len() >= 6);
         let col = inside / 3;
         let values = [
             s.cpu
@@ -493,11 +560,11 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         ];
         for (index, title) in ["CPU", "MEMORY", "STORAGE"].iter().enumerate() {
             let x = 2 + col * index;
-            frame.text(x, 5, title, Color::Muted, col - 2);
-            frame.text(x, 6, &values[index], Color::Text, col - 2);
+            frame.text(x, resource_y, title, Color::Muted, col - 2);
+            frame.text(x, resource_y + 1, &values[index], Color::Text, col - 2);
             frame.bar(
                 x,
-                7,
+                resource_y + 2,
                 col - 3,
                 percentages[index],
                 pressure(percentages[index]),
@@ -514,25 +581,41 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             .rev()
             .map(|p| symbols[((p.clamp(0.0, 100.0) / 100.0 * 7.0).round() as usize).min(7)])
             .collect();
-        frame.text(2, 8, &spark, Color::Cyan, col - 2);
-        frame.text(2, 9, &format!("Load {}", s.load), Color::Muted, col - 2);
+        if resource_y + 3 < layout.resources.end {
+            frame.text(2, resource_y + 3, &spark, Color::Cyan, col - 2);
+        }
+        if resource_y + 4 < layout.resources.end {
+            frame.text(
+                2,
+                resource_y + 4,
+                &format!("Load {}", s.load),
+                Color::Muted,
+                col - 2,
+            );
+        }
         let available = s
             .memory
             .map(|(used, total)| format!("Available {}", bytes(total.saturating_sub(used))))
             .unwrap_or_default();
-        frame.text(2 + col, 8, &available, Color::Muted, col - 2);
-        frame.text(
-            2 + col,
-            9,
-            &format!("Swap {}", usage(s.swap)),
-            Color::Muted,
-            col - 2,
-        );
+        if resource_y + 3 < layout.resources.end {
+            frame.text(2 + col, resource_y + 3, &available, Color::Muted, col - 2);
+        }
+        if resource_y + 4 < layout.resources.end {
+            frame.text(
+                2 + col,
+                resource_y + 4,
+                &format!("Swap {}", usage(s.swap)),
+                Color::Muted,
+                col - 2,
+            );
+        }
         let free = s
             .disk
             .map(|(_, _, available)| format!("Free {}", bytes(available)))
             .unwrap_or_default();
-        frame.text(2 + col * 2, 8, &free, Color::Muted, col - 2);
+        if resource_y + 3 < layout.resources.end {
+            frame.text(2 + col * 2, resource_y + 3, &free, Color::Muted, col - 2);
+        }
     } else {
         for (index, (title, value, percent)) in [
             (
@@ -552,13 +635,35 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         .iter()
         .enumerate()
         {
-            let y = 4 + index;
+            let y = layout.resources.start + index;
             frame.text(2, y, title, Color::Muted, 8);
             frame.text(11, y, value, Color::Text, 26);
             frame.bar(38, y, w - 41, *percent, pressure(*percent));
         }
+        let available = s
+            .memory
+            .map(|(used, total)| bytes(total.saturating_sub(used)))
+            .unwrap_or_else(|| "—".into());
+        let free = s
+            .disk
+            .map(|(_, _, available)| bytes(available))
+            .unwrap_or_else(|| "—".into());
+        for (index, detail) in [
+            format!("Load {}", s.load),
+            format!("Swap {}", usage(s.swap)),
+            format!("Memory available {available}"),
+            format!("Storage free {free}"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let y = layout.resources.start + 3 + index;
+            if y < layout.resources.end {
+                frame.text(2, y, detail, Color::Muted, inside);
+            }
+        }
     }
-    let b = layout.build_y;
+    let b = layout.build.start;
     frame.rule(b, "BUILD");
     let active = !s.processes.is_empty();
     let status = if active { "● ACTIVE" } else { "○ IDLE" };
@@ -576,22 +681,29 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         Color::Text,
         w - 17,
     );
+    let progress_y = b + 2 + usize::from(layout.build.len() >= 6);
     if let Some((reported, total)) = log.current_progress() {
         let label = format!("{reported} / {total} jobs");
         let bar_width = inside.saturating_sub(label.len() + 3);
         frame.bar(
             2,
-            b + 3,
+            progress_y,
             bar_width,
             reported as f64 / total as f64 * 100.0,
             Color::Cyan,
         );
         let x = if bar_width == 0 { 2 } else { 4 + bar_width };
-        frame.text(x, b + 3, &label, Color::Text, (w - 2).saturating_sub(x));
+        frame.text(
+            x,
+            progress_y,
+            &label,
+            Color::Text,
+            (w - 2).saturating_sub(x),
+        );
     } else {
         frame.text(
             2,
-            b + 3,
+            progress_y,
             "Lake jobs unknown · waiting for build status output",
             Color::Muted,
             inside,
@@ -599,16 +711,18 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
     }
     let lines = log.visible_lines();
     let latest = lines.iter().rev().find(|line| progress(line).is_some());
-    frame.text(
-        2,
-        b + 4,
-        &format!(
-            "Latest event   {}",
-            latest.map(|s| s.as_str()).unwrap_or("—")
-        ),
-        Color::Text,
-        inside,
-    );
+    if progress_y + 1 < layout.build.end {
+        frame.text(
+            2,
+            progress_y + 1,
+            &format!(
+                "Latest event   {}",
+                latest.map(|s| s.as_str()).unwrap_or("—")
+            ),
+            Color::Text,
+            inside,
+        );
+    }
     let source = log
         .path
         .as_ref()
@@ -633,13 +747,15 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
             )
         })
         .unwrap_or_else(|| "waiting".into());
-    frame.text(
-        2,
-        b + 5,
-        &format!("Log: {source} · last read {observed}"),
-        Color::Muted,
-        inside,
-    );
+    if progress_y + 2 < layout.build.end {
+        frame.text(
+            2,
+            progress_y + 2,
+            &format!("Log: {source} · last read {observed}"),
+            Color::Muted,
+            inside,
+        );
+    }
     let log_y = layout.log.as_ref().unwrap().start;
     if let Some(process_region) = &layout.processes {
         let start = state
@@ -654,7 +770,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         frame.rule(process_region.start, &format!("PROCESSES · {range}"));
         frame.text(
             2,
-            b + 8,
+            process_region.start + 1,
             "PID      NAME      MEMORY       COMMAND",
             Color::Muted,
             inside,
@@ -667,12 +783,18 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
                 bytes(process.rss),
                 process.command
             );
-            frame.text(2, b + 9 + index, &row, Color::Text, inside);
+            frame.text(
+                2,
+                process_region.start + 2 + index,
+                &row,
+                Color::Text,
+                inside,
+            );
         }
         if s.processes.is_empty() {
             frame.text(
                 2,
-                b + 9,
+                process_region.start + 2,
                 "No Lean/Lake processes detected. Waiting for a build…",
                 Color::Muted,
                 inside,
@@ -738,7 +860,7 @@ pub fn render(view: &View<'_>, width: usize, height: usize) -> Frame {
         let help = [
             "KEYBOARD",
             "Wheel        Scroll the panel under pointer",
-            "Left drag    Resize the Build Log divider",
+            "Left drag    Resize any section divider",
             "q / Ctrl-C   Quit monitor (build continues)",
             "Space        Pause sampling and log reading",
             "Up / k       Scroll toward older log lines",
@@ -775,6 +897,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_full_layout_divider_resizes_only_its_adjacent_sections() {
+        let snapshot = crate::monitor::demo(0);
+        for (index, target) in [(0, 9), (1, 16), (2, 26)] {
+            let mut state = ViewState {
+                offset: 6,
+                follow: false,
+                ..ViewState::default()
+            };
+            let before = Layout::new(110, 38, None);
+            let (upper, lower) = before.adjacent(index).unwrap();
+            assert!(state.mouse(MouseKind::Press, 9, lower.start, (110, 38), &snapshot));
+            assert!(state.mouse(MouseKind::Drag, 9, target, (110, 38), &snapshot));
+            let after = Layout::new(110, 38, state.pane_heights);
+            let (new_upper, new_lower) = after.adjacent(index).unwrap();
+            assert_eq!(new_upper, upper.start..target);
+            assert_eq!(new_lower, target..lower.end);
+            assert_eq!((state.offset, state.follow), (6, false));
+            if index != 0 {
+                assert_eq!(before.resources, after.resources);
+            }
+            if index != 2 {
+                assert_eq!(before.log, after.log);
+            }
+            assert!(state.mouse(MouseKind::Release, 9, target, (110, 38), &snapshot));
+            let preferences = state.pane_heights;
+            assert!(!state.mouse(MouseKind::Drag, 9, 0, (110, 38), &snapshot));
+            assert_eq!(state.pane_heights, preferences);
+        }
+    }
+
+    #[test]
+    fn all_dividers_clamp_at_minimum_heights_in_full_and_compact_layouts() {
+        let snapshot = crate::monitor::demo(0);
+        for size in [(110, 38), (79, 24), (52, 20)] {
+            let initial = Layout::new(size.0, size.1, None);
+            for index in 0..3 {
+                let Some((_, lower)) = initial.adjacent(index) else {
+                    continue;
+                };
+                for row in [0, usize::MAX] {
+                    let mut state = ViewState::default();
+                    state.mouse(MouseKind::Press, 9, lower.start, size, &snapshot);
+                    state.mouse(MouseKind::Drag, 9, row, size, &snapshot);
+                    let layout = Layout::new(size.0, size.1, state.pane_heights);
+                    assert!(layout.resources.len() >= 3);
+                    assert!(layout.build.len() >= 3);
+                    if let Some(region) = &layout.processes {
+                        assert!(region.len() >= 3);
+                    }
+                    assert!(layout.log.as_ref().unwrap().len() >= 4);
+                    assert_eq!(layout.resources.end, layout.build.start);
+                    assert_eq!(
+                        layout.build.end,
+                        layout
+                            .processes
+                            .as_ref()
+                            .unwrap_or(layout.log.as_ref().unwrap())
+                            .start
+                    );
+                    assert_eq!(layout.log.as_ref().unwrap().end, size.1 - 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shrinking_resource_and_build_sections_does_not_draw_over_later_sections() {
+        let snapshot = crate::monitor::demo(0);
+        let log = LogTail::default();
+        let state = ViewState {
+            pane_heights: Some([3, 3, 3]),
+            ..ViewState::default()
+        };
+        let layout = Layout::new(110, 38, state.pane_heights);
+        let frame = render(
+            &View {
+                snapshot: &snapshot,
+                log: &log,
+                state: &state,
+                project: "/srv/riemann",
+                host: "ubuntu",
+                cores: 16,
+                interval_ms: 500,
+            },
+            110,
+            38,
+        );
+        let lines: Vec<_> = frame.plain().lines().map(str::to_string).collect();
+        assert!(lines[layout.build.start].contains("BUILD"));
+        assert!(lines[layout.processes.as_ref().unwrap().start].contains("PROCESSES"));
+        assert!(lines[layout.log.as_ref().unwrap().start].contains("BUILD LOG"));
+        let logs = lines[layout.log.as_ref().unwrap().start..].join("\n");
+        for hidden in [
+            "Load ",
+            "Swap ",
+            "Available ",
+            "Latest event",
+            "last read",
+            "PID ",
+        ] {
+            assert!(
+                !logs.contains(hidden),
+                "Clipped content leaked into logs: {hidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_layout_modes_cancels_an_in_progress_drag() {
+        let snapshot = crate::monitor::demo(0);
+        let mut state = ViewState::default();
+        state.mouse(MouseKind::Press, 9, 18, (110, 38), &snapshot);
+        assert!(state.dragging_divider.is_some());
+        state.mouse(MouseKind::Drag, 9, 16, (79, 24), &snapshot);
+        assert!(state.dragging_divider.is_none());
+        assert!(state.pane_heights.is_none());
+    }
+
+    #[test]
     fn divider_drag_resizes_logs_and_preserves_independent_scroll_state() {
         let snapshot = crate::monitor::demo(0);
         let mut state = ViewState {
@@ -785,9 +1026,9 @@ mod tests {
         };
         assert!(!state.mouse(MouseKind::Drag, 9, 22, (110, 38), &snapshot));
         assert!(state.mouse(MouseKind::Press, 9, 24, (110, 38), &snapshot));
-        assert!(state.dragging_log);
+        assert!(state.dragging_divider.is_some());
         assert!(state.mouse(MouseKind::Drag, 9, 22, (110, 38), &snapshot));
-        let expanded = Layout::new(110, 38, state.log_height);
+        let expanded = Layout::new(110, 38, state.pane_heights);
         assert_eq!(expanded.log.as_ref().unwrap().start, 22);
         assert_eq!(expanded.process_rows(), 1);
         assert_eq!(
@@ -795,12 +1036,12 @@ mod tests {
             (3, 6, false)
         );
         assert!(state.mouse(MouseKind::Release, 9, 22, (110, 38), &snapshot));
-        let height = state.log_height;
+        let height = state.pane_heights;
         assert!(!state.mouse(MouseKind::Drag, 9, 30, (110, 38), &snapshot));
-        assert_eq!(state.log_height, height);
+        assert_eq!(state.pane_heights, height);
         assert!(state.mouse(MouseKind::Press, 9, 22, (110, 38), &snapshot));
         assert!(state.mouse(MouseKind::Drag, 9, usize::MAX, (110, 38), &snapshot));
-        let shrunk = Layout::new(110, 38, state.log_height);
+        let shrunk = Layout::new(110, 38, state.pane_heights);
         assert_eq!(shrunk.log.as_ref().unwrap().len() - 1, 3);
         assert_eq!(
             state.process_offset, 0,
@@ -835,7 +1076,7 @@ mod tests {
         assert!(!state.follow);
         state.help = true;
         assert!(!state.mouse(MouseKind::Press, 9, 30, (110, 38), &snapshot));
-        assert!(!state.dragging_log);
+        assert!(state.dragging_divider.is_none());
     }
 
     #[test]
@@ -843,9 +1084,15 @@ mod tests {
         let snapshot = crate::monitor::demo(0);
         let log = LogTail::default();
         for (width, height) in [(40, 12), (52, 20), (79, 24), (90, 32), (110, 38), (110, 60)] {
-            for requested in [Some(0), Some(3), Some(13), Some(usize::MAX)] {
+            for requested in [
+                None,
+                Some([0; 3]),
+                Some([3; 3]),
+                Some([7, 7, 6]),
+                Some([usize::MAX; 3]),
+            ] {
                 let state = ViewState {
-                    log_height: requested,
+                    pane_heights: requested,
                     ..ViewState::default()
                 };
                 let layout = Layout::new(width, height, requested);

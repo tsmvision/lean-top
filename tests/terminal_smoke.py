@@ -103,6 +103,28 @@ def exercise(binary, quit_key=None):
         assert event_output(b"\x1b[<65;10;22M") == b"", "Help must block underlying mouse scrolling"
         event_output(b"?")
 
+        # The BUILD divider shares space between resources and the build panel.
+        event_output(b"\x1b[<0;10;12M")
+        output = event_output(b"\x1b[<32;10;10M", b"BUILD")
+        assert_panel_only(output,5,18)
+        assert b"\x1b[10;1H" in output
+        event_output(b"\x1b[<0;10;10m")
+        event_output(b"\x1b[<0;10;10M")
+        assert_panel_only(event_output(b"\x1b[<32;10;12M", b"BUILD"),5,18)
+        event_output(b"\x1b[<0;10;12m")
+
+        # The PROCESSES divider shares space with Build, leaving logs untouched.
+        event_output(b"\x1b[<0;10;19M")
+        output = event_output(b"\x1b[<32;10;17M", b"1-5 / 6")
+        assert_panel_only(output,12,24)
+        assert b"\x1b[17;1H" in output
+        event_output(b"\x1b[<0;10;17m")
+        assert_panel_only(event_output(b"\x1b[<65;10;20M",b"2-6 / 6"),17,24)
+        event_output(b"\x1b[<64;10;20M",b"1-5 / 6")
+        event_output(b"\x1b[<0;10;17M")
+        assert_panel_only(event_output(b"\x1b[<32;10;19M",b"1-3 / 6"),12,24)
+        event_output(b"\x1b[<0;10;19m")
+
         # Drag the log header (row25) upward to row23, then downward to row29.
         event_output(b"\x1b[<0;10;25M")
         output = event_output(b"\x1b[<32;10;23M", b"1-1 / 6")
@@ -129,6 +151,16 @@ def exercise(binary, quit_key=None):
         expect(b"DEMO", b" ")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         expect(b"LEAN TOP")
+        # Compact mode has Resources/Build/Log and both remaining dividers work.
+        event_output(b" ",b"PAUSED")
+        event_output(b"\x1b[<0;10;12M")
+        assert_panel_only(event_output(b"\x1b[<32;10;10M",b"BUILD"),5,18)
+        event_output(b"\x1b[<0;10;10m")
+        event_output(b"\x1b[<0;10;19M")
+        output = event_output(b"\x1b[<32;10;17M",b"BUILD LOG")
+        assert_panel_only(output,10,22)
+        assert b"\x1b[17;1H" in output
+        event_output(b"\x1b[<0;10;17m")
         if quit_key is None:
             process.send_signal(signal.SIGTERM)
         else:
@@ -180,7 +212,7 @@ def main():
         assert b"require Linux /proc" not in live
         assert b"Disk capacity unavailable" not in live
         assert b"Sampling" not in live
-    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, scoped mouse wheel, divider drag, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
+    print("PASS: snapshot, invalid arguments, non-TTY, FIFO rejection, pause, scoped mouse wheel, all section dividers, help, keyboard scroll/follow, resize, q/Ctrl-C/SIGTERM, terminal/mouse restoration")
 
 
 if __name__ == "__main__":

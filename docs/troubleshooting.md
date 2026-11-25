@@ -81,9 +81,11 @@ Place the pointer over the Processes or Build Log panel before using the wheel. 
 
 Mouse scrolling requires a terminal or terminal multiplexer that forwards XTerm-compatible mouse reports to the application. Some terminals or modifier keys route the wheel to terminal history instead. Check your terminal or multiplexer mouse settings if events do not reach the application. Keyboard `↑`/`↓` or `j`/`k` remain available for logs; `f` resumes following the latest output. The monitor continues to update resource metrics while you scroll.
 
-## The log divider does not move
+## A section divider does not move
 
-Start dragging on the header labeled `BUILD LOG`, using the left mouse button. Dragging from log content or another panel does not resize the log. Close help first, and ensure your terminal forwards button-motion reports. The divider stops at the minimum heights for logs and, in the full layout, processes. Resource and build summaries remain fixed; compact terminals therefore have less resizing space. Release the button before scrolling. Height preferences last for the current session only.
+Start dragging on a horizontal divider labeled `BUILD`, `PROCESSES`, or `BUILD LOG`, using the left mouse button. The divider resizes the adjacent sections; dragging inside their content does not resize them. CPU, Memory, and Storage share the Resources section, adjusted using the `BUILD` divider below them. Close help first, and ensure your terminal forwards button-motion reports.
+
+Dividers stop when either adjacent pane reaches its minimum height. The title/header and footer remain fixed, and Processes is hidden in compact mode. Expand the terminal if there is not enough room to grow a section further. Shrinking a section hides optional details while retaining its core values or progress. Release the button before scrolling. Height preferences last for the current session only.
 
 ## Storage does not match the project directory's size
 

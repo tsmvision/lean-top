@@ -28,7 +28,7 @@ Options:
 
 Keys: q/Ctrl-C quit, Space pause, Up/Down or j/k scroll, f follow, ? help.
 Mouse: wheel over Processes or Build Log to scroll that panel independently.
-Left-drag the Build Log header to adjust its height.
+Left-drag a section divider to resize the adjacent sections.
 Metrics and processes are server-wide. Storage follows the project filesystem.
 The monitor only reads; run lake build separately and capture its output.
 ";
@@ -251,7 +251,7 @@ fn run(options: Options) -> io::Result<()> {
                             state.offset = 0;
                         }
                         Event::Key(b'?') => {
-                            state.dragging_log = false;
+                            state.dragging_divider = None;
                             state.help = !state.help;
                         }
                         _ => dirty = false,
